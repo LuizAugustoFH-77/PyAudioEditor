@@ -38,7 +38,7 @@ A modern, high-performance Digital Audio Workstation (DAW) built with Python, Py
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/PyAudioEditor.git
+   git clone https://github.com/LuizAugustoFH-77/PyAudioEditor.git
    cd PyAudioEditor
    ```
 
