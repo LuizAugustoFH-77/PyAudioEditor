@@ -1,0 +1,3 @@
+"""
+PyAudioEditor Test Suite
+"""

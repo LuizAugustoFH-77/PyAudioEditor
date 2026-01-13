@@ -1,37 +1,95 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider
+"""
+Track widget for PyAudioEditor.
+Displays track controls and waveform visualization.
+"""
+from __future__ import annotations
+import logging
+from typing import TYPE_CHECKING, Optional
+
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider
+)
 from PyQt6.QtCore import Qt, QSize
 import qtawesome as qta
-from src.ui.waveform_view import WaveformWidget
-from src.utils.logger import logger
+
+from .waveform_view import WaveformWidget
+
+if TYPE_CHECKING:
+    from src.core.track import AudioTrack
+    from src.core.audio_engine import AudioEngine
+
+logger = logging.getLogger("PyAudacity")
+
 
 class TrackWidget(QWidget):
-    def __init__(self, track, audio_engine, parent=None):
+    """
+    Widget representing a single audio track with controls and waveform display.
+    """
+    
+    def __init__(
+        self, 
+        track: "AudioTrack", 
+        audio_engine: "AudioEngine", 
+        parent: Optional[QWidget] = None
+    ) -> None:
         super().__init__(parent)
-        self.track = track
-        self.audio_engine = audio_engine
-        logger.debug(f"TrackWidget created for: {track.name}")
-        logger.debug(f"Track data shape: {track.data.shape if track.data is not None else 'None'}")
-        self.init_ui()
         
-    def init_ui(self):
-        self.layout = QHBoxLayout()
-        self.setLayout(self.layout)
-        self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(0)
+        self._track = track
+        self._audio_engine = audio_engine
+        
+        logger.debug("TrackWidget created for: %s", track.name)
+        
+        self._init_ui()
+    
+    @property
+    def track(self) -> "AudioTrack":
+        return self._track
+    
+    @property
+    def waveform(self) -> WaveformWidget:
+        return self._waveform
+    
+    def _init_ui(self) -> None:
+        """Initialize UI components."""
+        self._layout = QHBoxLayout()
+        self.setLayout(self._layout)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
         self.setMinimumHeight(100)
         self.setMaximumHeight(120)
         
         # Track Control Panel (Left)
-        self.controls_widget = QWidget()
-        self.controls_widget.setFixedWidth(140)
-        self.controls_widget.setStyleSheet("background-color: #2a2a2a; border-right: 1px solid #444;")
-        self.controls_layout = QVBoxLayout()
-        self.controls_layout.setContentsMargins(8, 8, 8, 8)
-        self.controls_layout.setSpacing(5)
-        self.controls_widget.setLayout(self.controls_layout)
+        self._create_controls_panel()
         
-        # Style for track buttons
-        track_btn_style = """
+        # Waveform View (Right)
+        self._waveform = WaveformWidget()
+        
+        if self._track.data is not None:
+            logger.info("Setting waveform data: %d samples", len(self._track.data))
+            self._waveform.blockSignals(True)
+            self._waveform.set_data(self._track.data, splits=self._track.splits)
+            self._waveform.blockSignals(False)
+        
+        self._layout.addWidget(self._controls_widget)
+        self._layout.addWidget(self._waveform, stretch=1)
+        
+        self.setStyleSheet("background-color: #222; border-bottom: 1px solid #333;")
+    
+    def _create_controls_panel(self) -> None:
+        """Create the left control panel."""
+        self._controls_widget = QWidget()
+        self._controls_widget.setFixedWidth(140)
+        self._controls_widget.setStyleSheet(
+            "background-color: #2a2a2a; border-right: 1px solid #444;"
+        )
+        
+        controls_layout = QVBoxLayout()
+        controls_layout.setContentsMargins(8, 8, 8, 8)
+        controls_layout.setSpacing(5)
+        self._controls_widget.setLayout(controls_layout)
+        
+        # Button style
+        btn_style = """
             QPushButton {
                 background-color: #3a3a3a;
                 border: 1px solid #555;
@@ -44,49 +102,62 @@ class TrackWidget(QWidget):
             QPushButton:pressed { background-color: #222; }
         """
         
-        # Name
-        self.name_row = QHBoxLayout()
-        self.name_label = QLabel(self.track.name)
-        self.name_label.setStyleSheet("font-weight: bold; color: #ddd; font-size: 11px;")
-        self.name_label.setWordWrap(True)
+        # Name row
+        name_row = QHBoxLayout()
         
-        self.btn_close = QPushButton()
-        self.btn_close.setIcon(qta.icon("fa5s.times", color="#888"))
-        self.btn_close.setIconSize(QSize(10, 10))
-        self.btn_close.setFixedSize(16, 16)
-        self.btn_close.setStyleSheet("QPushButton { border: none; background: transparent; } QPushButton:hover { color: white; }")
-        self.btn_close.clicked.connect(lambda: self.audio_engine.remove_track(self.track_index()))
+        self._name_label = QLabel(self._track.name)
+        self._name_label.setStyleSheet(
+            "font-weight: bold; color: #ddd; font-size: 11px;"
+        )
+        self._name_label.setWordWrap(True)
         
-        self.name_row.addWidget(self.name_label)
-        self.name_row.addStretch()
-        self.name_row.addWidget(self.btn_close)
+        self._btn_close = QPushButton()
+        self._btn_close.setIcon(qta.icon("fa5s.times", color="#888"))
+        self._btn_close.setIconSize(QSize(10, 10))
+        self._btn_close.setFixedSize(16, 16)
+        self._btn_close.setStyleSheet(
+            "QPushButton { border: none; background: transparent; } "
+            "QPushButton:hover { color: white; }"
+        )
+        self._btn_close.clicked.connect(self._on_close_clicked)
         
-        # Mute/Solo
-        self.btn_row = QHBoxLayout()
-        self.btn_row.setSpacing(4)
-        self.btn_mute = QPushButton()
-        self.btn_mute.setIcon(qta.icon("fa5s.volume-mute", color="white"))
-        self.btn_mute.setIconSize(QSize(14, 14))
-        self.btn_mute.setCheckable(True)
-        self.btn_mute.toggled.connect(self.toggle_mute)
-        self.btn_mute.setStyleSheet(track_btn_style + "QPushButton:checked { background-color: #a82a2a; border-color: #ff5555; }")
+        name_row.addWidget(self._name_label)
+        name_row.addStretch()
+        name_row.addWidget(self._btn_close)
         
-        self.btn_solo = QPushButton()
-        self.btn_solo.setIcon(qta.icon("fa5s.headphones", color="white"))
-        self.btn_solo.setIconSize(QSize(14, 14))
-        self.btn_solo.setCheckable(True)
-        self.btn_solo.toggled.connect(self.toggle_solo)
-        self.btn_solo.setStyleSheet(track_btn_style + "QPushButton:checked { background-color: #2a8a2a; border-color: #55ff55; }")
+        # Mute/Solo buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(4)
         
-        self.btn_row.addWidget(self.btn_mute)
-        self.btn_row.addWidget(self.btn_solo)
+        self._btn_mute = QPushButton()
+        self._btn_mute.setIcon(qta.icon("fa5s.volume-mute", color="white"))
+        self._btn_mute.setIconSize(QSize(14, 14))
+        self._btn_mute.setCheckable(True)
+        self._btn_mute.toggled.connect(self._toggle_mute)
+        self._btn_mute.setStyleSheet(
+            btn_style + 
+            "QPushButton:checked { background-color: #a82a2a; border-color: #ff5555; }"
+        )
         
-        # Volume
-        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
-        self.volume_slider.setRange(0, 150) 
-        self.volume_slider.setValue(100)
-        self.volume_slider.setFixedHeight(15)
-        self.volume_slider.setStyleSheet("""
+        self._btn_solo = QPushButton()
+        self._btn_solo.setIcon(qta.icon("fa5s.headphones", color="white"))
+        self._btn_solo.setIconSize(QSize(14, 14))
+        self._btn_solo.setCheckable(True)
+        self._btn_solo.toggled.connect(self._toggle_solo)
+        self._btn_solo.setStyleSheet(
+            btn_style + 
+            "QPushButton:checked { background-color: #2a8a2a; border-color: #55ff55; }"
+        )
+        
+        btn_row.addWidget(self._btn_mute)
+        btn_row.addWidget(self._btn_solo)
+        
+        # Volume slider
+        self._volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self._volume_slider.setRange(0, 150)
+        self._volume_slider.setValue(100)
+        self._volume_slider.setFixedHeight(15)
+        self._volume_slider.setStyleSheet("""
             QSlider::groove:horizontal {
                 border: 1px solid #555;
                 height: 4px;
@@ -102,53 +173,52 @@ class TrackWidget(QWidget):
             }
             QSlider::handle:horizontal:hover { background: #aaa; }
         """)
-        self.volume_slider.valueChanged.connect(self.set_volume)
+        self._volume_slider.valueChanged.connect(self._set_volume)
         
-        self.controls_layout.addLayout(self.name_row)
-        self.controls_layout.addLayout(self.btn_row)
-        
+        # Volume row with icon
         vol_layout = QHBoxLayout()
         vol_layout.setSpacing(5)
+        
         vol_icon = QLabel()
         vol_icon.setPixmap(qta.icon("fa5s.volume-up", color="gray").pixmap(12, 12))
         vol_layout.addWidget(vol_icon)
-        vol_layout.addWidget(self.volume_slider)
+        vol_layout.addWidget(self._volume_slider)
         
-        self.controls_layout.addLayout(vol_layout)
-        self.controls_layout.addStretch()
-        
-        # Waveform View (Right)
-        self.waveform = WaveformWidget()
-        
-        # Pass data to waveform
-        if self.track.data is not None:
-            logger.info(f"Setting waveform data: {len(self.track.data)} samples")
-            self.waveform.blockSignals(True)
-            self.waveform.set_data(self.track.data, splits=self.track.splits)
-            self.waveform.blockSignals(False)
-        else:
-            logger.warning("Track data is None when creating TrackWidget!")
-        
-        self.layout.addWidget(self.controls_widget)
-        self.layout.addWidget(self.waveform, stretch=1)
-        
-        # Style
-        self.setStyleSheet("background-color: #222; border-bottom: 1px solid #333;")
-
-    def toggle_mute(self, checked):
-        self.track.muted = checked
-        
-    def toggle_solo(self, checked):
-        self.track.soloed = checked
-        
-    def set_volume(self, value):
-        self.track.gain = value / 100.0
-
-    def toggle_spectrogram(self, enabled):
-        self.waveform.toggle_spectrogram(enabled)
-
-    def track_index(self):
+        # Add all to controls layout
+        controls_layout.addLayout(name_row)
+        controls_layout.addLayout(btn_row)
+        controls_layout.addLayout(vol_layout)
+        controls_layout.addStretch()
+    
+    def _on_close_clicked(self) -> None:
+        """Handle close button click."""
+        index = self._get_track_index()
+        if index >= 0:
+            self._audio_engine.remove_track(index)
+    
+    def _toggle_mute(self, checked: bool) -> None:
+        """Toggle track mute state."""
+        self._track.muted = checked
+    
+    def _toggle_solo(self, checked: bool) -> None:
+        """Toggle track solo state."""
+        self._track.soloed = checked
+    
+    def _set_volume(self, value: int) -> None:
+        """Set track volume from slider."""
+        self._track.gain = value / 100.0
+    
+    def toggle_spectrogram(self, enabled: bool) -> None:
+        """Toggle spectrogram display."""
+        self._waveform.toggle_spectrogram(enabled)
+    
+    def _get_track_index(self) -> int:
+        """Get index of this track in the engine."""
         try:
-            return self.audio_engine.tracks.index(self.track)
-        except:
+            return self._audio_engine.tracks.index(self._track)
+        except ValueError:
             return -1
+    
+    def track_index(self) -> int:
+        """Get track index (legacy compatibility)."""
+        return self._get_track_index()

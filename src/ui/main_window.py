@@ -1,19 +1,106 @@
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QPushButton, QLabel, QFileDialog, QScrollBar, QScrollArea,
-                             QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox,
-                             QInputDialog, QMessageBox)
-from PyQt6.QtCore import Qt, QTimer, QSize
-from PyQt6.QtGui import QAction, QIcon, QKeySequence
-import os
-import qdarktheme
+"""
+Main window for PyAudioEditor.
+Provides the primary user interface for audio editing.
+"""
+from __future__ import annotations
+import logging
+import time
+from typing import Optional, Callable, Any
+
+from PyQt6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+    QPushButton, QLabel, QFileDialog, QScrollBar, QScrollArea,
+    QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox,
+    QInputDialog, QMessageBox, QProgressBar
+)
+from PyQt6.QtCore import Qt, QTimer, QSize, QThread, pyqtSignal
+from PyQt6.QtGui import QAction, QKeySequence, QCloseEvent
 import qtawesome as qta
 
 from src.core.audio_engine import AudioEngine
-from src.ui.waveform_view import WaveformWidget
-from src.ui.track_widget import TrackWidget
-from src.ui.time_ruler import TimeRulerWidget
+from src.core import effects_basic as fx
+from src.core import effects_vocal as fx_vocal
+from .time_ruler import TimeRulerWidget
+from .track_widget import TrackWidget
+from .waveform_view import WaveformWidget
+
+logger = logging.getLogger("PyAudacity")
+
+# --- Worker Thread for Background Processing ---
+class AudioProcessingWorker(QThread):
+    progress = pyqtSignal(int, str, float)  # percent, status, eta_seconds
+    finished = pyqtSignal(bool, object)     # success, result/error_msg
+
+    def __init__(self, target_func, *args, **kwargs):
+        super().__init__()
+        self.target_func = target_func
+        self.args = args
+        self.kwargs = kwargs
+        self.start_time = 0
+
+    def run(self):
+        try:
+            self.start_time = time.time()
+            # Handle progress callback injection if supported mainly for my implementation
+            # For now running directly
+            result = self.target_func(*self.args, **self.kwargs)
+            self.finished.emit(True, result)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.finished.emit(False, str(e))
+
+    def update_progress(self, current, total, status="Processing..."):
+        if total <= 0: return
+        percent = int((current / total) * 100)
+        elapsed = time.time() - self.start_time
+        # Simple ETA
+        eta = (elapsed / current) * (total - current) if current > 0 else 0
+        self.progress.emit(percent, status, eta)
+
+
+# --- Progress Dialog ---
+class ProgressDialog(QDialog):
+    def __init__(self, title="Processing Audio", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setFixedSize(400, 150)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint)
+        
+        layout = QVBoxLayout(self)
+        
+        self.status_label = QLabel("Initializing...")
+        self.status_label.setStyleSheet("font-weight: bold; margin-bottom: 5px;")
+        
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 0) # Indeterminate by default
+        self.bar.setTextVisible(True)
+        
+        self.eta_label = QLabel("Estimating time...")
+        self.eta_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.eta_label.setStyleSheet("color: #888;")
+        
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.bar)
+        layout.addWidget(self.eta_label)
+        layout.addStretch()
+
+    def update_status(self, percent, status, eta_secs):
+        if self.bar.maximum() == 0:
+            self.bar.setRange(0, 100)
+            
+        self.bar.setValue(percent)
+        self.status_label.setText(status)
+        
+        if eta_secs > 0:
+            mins, secs = divmod(int(eta_secs), 60)
+            self.eta_label.setText(f"Time remaining: ~{mins:02d}:{secs:02d}")
+        else:
+            self.eta_label.setText("Finishing up...")
 
 class MainWindow(QMainWindow):
+
     def __init__(self):
         super().__init__()
         
@@ -45,6 +132,27 @@ class MainWindow(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.periodic_update)
         self.timer.start(30) # 30 ms interval
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Ensure audio stream and worker threads stop before Qt teardown."""
+        try:
+            if hasattr(self, 'timer') and self.timer is not None:
+                self.timer.stop()
+
+            if hasattr(self, 'fake_progress_timer') and self.fake_progress_timer is not None:
+                self.fake_progress_timer.stop()
+
+            # Stop any running worker thread cleanly.
+            if hasattr(self, 'worker') and self.worker is not None and self.worker.isRunning():
+                self.worker.requestInterruption()
+                self.worker.quit()
+                self.worker.wait(2000)
+
+            # Stop playback / detach callbacks before QObject destruction.
+            if hasattr(self, 'audio_engine') and self.audio_engine is not None:
+                self.audio_engine.cleanup()
+        finally:
+            super().closeEvent(event)
 
     def create_toolbar(self):
         # File & History Toolbar
@@ -118,6 +226,23 @@ class MainWindow(QMainWindow):
             
         effects_menu.addSeparator()
         
+        # Advanced Vocal Effects Submenu
+        vocal_menu = effects_menu.addMenu("Vocal Processing")
+        
+        vocal_effects = [
+            ("Pitch Shift (Time-Preserving)", "pitch_shift"),
+            ("Compressor", "compressor"),
+            ("De-Esser", "deesser"),
+            ("Chorus", "chorus"),
+        ]
+        
+        for label, name in vocal_effects:
+            action = QAction(label, self)
+            action.triggered.connect(lambda checked, n=name: self.show_effect_dialog(n))
+            vocal_menu.addAction(action)
+        
+        effects_menu.addSeparator()
+        
         # Presets Submenu
         presets_menu = effects_menu.addMenu("Presets (Popular Styles)")
         
@@ -132,28 +257,157 @@ class MainWindow(QMainWindow):
             action = QAction(label, self)
             action.triggered.connect(lambda checked, n=name: self.apply_preset_dialog(n))
             presets_menu.addAction(action)
+        
+        presets_menu.addSeparator()
+        
+        # Miku Ver. Presets
+        miku_menu = presets_menu.addMenu("🎤 Miku Ver. (Vocaloid Style)")
+        
+        miku_presets = [
+            ("Miku Ver. (Standard)", "miku_ver", "Classic Hatsune Miku sound (+4 semitones)"),
+            ("Miku Ver. Soft", "miku_ver_soft", "Softer, more natural variant (+3 semitones)"),
+            ("Miku Ver. Hard", "miku_ver_hard", "More robotic/synthetic (+5 semitones)"),
+        ]
+        
+        for label, name, tooltip in miku_presets:
+            action = QAction(label, self)
+            action.setToolTip(tooltip)
+            action.triggered.connect(lambda checked, n=name: self.apply_preset_dialog(n))
+            miku_menu.addAction(action)
 
-    def apply_preset_dialog(self, preset_name):
+    def apply_preset_dialog(self, preset_name: str) -> None:
+        """Apply a preset effect to a selected track."""
         if not self.audio_engine.tracks:
             self.statusBar().showMessage("No tracks to apply preset", 3000)
             return
-            
-        # If only one track, apply directly
-        if len(self.audio_engine.tracks) == 1:
-            self.audio_engine.apply_preset(preset_name, 0)
-            self.statusBar().showMessage(f"Applied {preset_name} to track 1", 3000)
+
+        idx = self.select_track_dialog("Apply Preset", f"Apply {preset_name} to:")
+        if idx is None:
             return
+
+        # Map preset names to functions
+        preset_map = {
+            "slowed_reverb": (fx_vocal.apply_slowed_reverb_preset, "Slowed + Reverb"),
+            "nightcore": (fx_vocal.apply_nightcore_preset, "Nightcore"),
+            "lofi": (fx_vocal.apply_lofi_preset, "Lo-Fi"),
+            "bass_boosted": (fx_vocal.apply_bass_boosted_preset, "Bass Boosted"),
+            "miku_ver": (lambda d, sr: fx_vocal.apply_miku_voice_chain(d, sr, 4.0, 1.12), "Miku Ver."),
+            "miku_ver_soft": (lambda d, sr: fx_vocal.apply_miku_voice_chain(d, sr, 3.0, 1.10), "Miku Ver. Soft"),
+            "miku_ver_hard": (lambda d, sr: fx_vocal.apply_miku_voice_chain(d, sr, 5.0, 1.15), "Miku Ver. Hard"),
+        }
+        
+        if preset_name not in preset_map:
+            self.statusBar().showMessage(f"Unknown preset: {preset_name}", 3000)
+            return
+        
+        effect_func, display_name = preset_map[preset_name]
+
+        # For heavy Miku preset, use background worker
+        if "miku" in preset_name:
+            def apply_preset_task():
+                return self.audio_engine.apply_effect(idx, effect_func, display_name)
             
-        # Multiple tracks: Show selection dialog
+            self.run_async_task(apply_preset_task, f"Applying {display_name}...")
+        else:
+            # Simple presets run on main thread
+            if self.audio_engine.apply_effect(idx, effect_func, display_name):
+                self.statusBar().showMessage(f"Applied {display_name} to track {idx+1}", 3000)
+            else:
+                self.statusBar().showMessage(f"Failed to apply {display_name}", 3000)
+
+    def select_track_dialog(self, title, label):
+        """Unified track selection dialog."""
+        if not self.audio_engine.tracks:
+            return None
+            
         track_names = [f"{i+1}: {t.name}" for i, t in enumerate(self.audio_engine.tracks)]
-        item, ok = QInputDialog.getItem(self, "Select Track", "Apply preset to:", track_names, 0, False)
+        
+        # Default to selected track if possible (logic to be added to track widgets later)
+        current_idx = 0
+        
+        item, ok = QInputDialog.getItem(self, title, label, track_names, current_idx, False)
         
         if ok and item:
-            idx = int(item.split(":")[0]) - 1
-            self.audio_engine.apply_preset(preset_name, idx)
-            self.statusBar().showMessage(f"Applied {preset_name} to {item}", 3000)
+            return int(item.split(":")[0]) - 1
+        return None
+
+    def run_async_task(self, task_func, title="Processing..."):
+        """Runs a task in background with progress dialog."""
+        # Create dialog
+        self.progress_dialog = ProgressDialog(title, self)
+        
+        # Add a note for AI tasks
+        if "Separation" in title or "Demucs" in title or "Spleeter" in title:
+            ai_note = QLabel("AI processing is intensive and may take several minutes.")
+            ai_note.setStyleSheet("color: #aaa; font-style: italic; font-size: 11px;")
+            self.progress_dialog.layout().insertWidget(1, ai_note)
+            
+        self.progress_dialog.show()
+        
+        # Setup worker
+        self.worker = AudioProcessingWorker(task_func)
+        self.worker.progress.connect(self.progress_dialog.update_status)
+        self.worker.finished.connect(self.on_async_task_finished)
+        
+        # Start
+        self.worker.start()
+        
+        # Fake progress for indeterminate tasks
+        self.fake_progress_timer = QTimer()
+        self.fake_progress_timer.timeout.connect(self.update_fake_progress)
+        self.fake_progress_val = 0
+        self.fake_progress_timer.start(500)
+
+    def update_fake_progress(self):
+        if hasattr(self, 'progress_dialog') and self.progress_dialog.isVisible():
+            # Slowly increment to 90%
+            if self.fake_progress_val < 90:
+                # Use a slower increment for AI tasks
+                title = self.progress_dialog.windowTitle()
+                is_ai = any(kw in title for kw in ["Separation", "Demucs", "Spleeter", "Miku"])
+                
+                step = 0.5 if is_ai else 1.0
+                self.fake_progress_val += (step + (90 - self.fake_progress_val) * 0.02)
+                
+                status = "AI Model Processing... (may take time)" if is_ai else "Processing..."
+                self.progress_dialog.update_status(int(self.fake_progress_val), status, 0)
+
+    def on_async_task_finished(self, success, result):
+        # Stop fake timer
+        if hasattr(self, 'fake_progress_timer'):
+            self.fake_progress_timer.stop()
+            
+        # Close dialog
+        if hasattr(self, 'progress_dialog'):
+            self.progress_dialog.close()
+            
+        if success:
+            if result is True:
+                self.statusBar().showMessage("Task completed successfully", 3000)
+            elif isinstance(result, str):
+                # Check for AI dependency errors
+                lower_res = result.lower()
+                if "pip install" in lower_res or "not installed" in lower_res or "not available" in lower_res:
+                    if "demucs" in lower_res:
+                        self.show_ai_install_help("demucs")
+                    elif "spleeter" in lower_res:
+                        self.show_ai_install_help("spleeter")
+                    else:
+                        QMessageBox.warning(self, "AI Tool Missing", result)
+                else:
+                    self.statusBar().showMessage(result, 5000)
+                    if "failed" in lower_res or "error" in lower_res:
+                        QMessageBox.warning(self, "Task Failed", result)
+            elif result is False:
+                QMessageBox.warning(self, "Task Failed", "The operation returned a failure status.")
+            
+            # Use specific result handling if needed, or just refresh
+            self.refresh_track_list()
+        else:
+            QMessageBox.critical(self, "Error", f"An error occurred during background processing:\n{result}")
 
     def show_effect_dialog(self, effect_name):
+
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Apply {effect_name}")
         layout = QFormLayout(dialog)
@@ -190,6 +444,84 @@ class MainWindow(QMainWindow):
             sb.setValue(1000)
             layout.addRow("Cutoff (Hz):", sb)
             params["cutoff"] = sb
+        elif effect_name == "pitch_shift":
+            sb = QDoubleSpinBox()
+            sb.setRange(-12, 12)
+            sb.setValue(0)
+            sb.setSingleStep(0.5)
+            layout.addRow("Semitones:", sb)
+            params["semitones"] = sb
+            
+            # Add info label
+            info = QLabel("Positive = higher pitch, Negative = lower pitch\nMiku-style: +3 to +5 semitones")
+            info.setStyleSheet("color: #888; font-size: 10px;")
+            layout.addRow(info)
+        elif effect_name == "compressor":
+            sb_thresh = QDoubleSpinBox()
+            sb_thresh.setRange(-60, 0)
+            sb_thresh.setValue(-20)
+            layout.addRow("Threshold (dB):", sb_thresh)
+            params["threshold_db"] = sb_thresh
+            
+            sb_ratio = QDoubleSpinBox()
+            sb_ratio.setRange(1, 20)
+            sb_ratio.setValue(4.0)
+            layout.addRow("Ratio:", sb_ratio)
+            params["ratio"] = sb_ratio
+            
+            sb_attack = QDoubleSpinBox()
+            sb_attack.setRange(0.1, 100)
+            sb_attack.setValue(5.0)
+            layout.addRow("Attack (ms):", sb_attack)
+            params["attack_ms"] = sb_attack
+            
+            sb_release = QDoubleSpinBox()
+            sb_release.setRange(10, 1000)
+            sb_release.setValue(100)
+            layout.addRow("Release (ms):", sb_release)
+            params["release_ms"] = sb_release
+            
+            sb_makeup = QDoubleSpinBox()
+            sb_makeup.setRange(-12, 24)
+            sb_makeup.setValue(0)
+            layout.addRow("Makeup Gain (dB):", sb_makeup)
+            params["makeup_db"] = sb_makeup
+        elif effect_name == "deesser":
+            sb_freq = QDoubleSpinBox()
+            sb_freq.setRange(2000, 12000)
+            sb_freq.setValue(6000)
+            layout.addRow("Frequency (Hz):", sb_freq)
+            params["frequency"] = sb_freq
+            
+            sb_thresh = QDoubleSpinBox()
+            sb_thresh.setRange(-40, 0)
+            sb_thresh.setValue(-20)
+            layout.addRow("Threshold (dB):", sb_thresh)
+            params["threshold_db"] = sb_thresh
+            
+            sb_red = QDoubleSpinBox()
+            sb_red.setRange(0, 20)
+            sb_red.setValue(6)
+            layout.addRow("Reduction (dB):", sb_red)
+            params["reduction_db"] = sb_red
+        elif effect_name == "chorus":
+            sb_rate = QDoubleSpinBox()
+            sb_rate.setRange(0.1, 5)
+            sb_rate.setValue(0.5)
+            layout.addRow("Rate (Hz):", sb_rate)
+            params["rate"] = sb_rate
+            
+            sb_depth = QDoubleSpinBox()
+            sb_depth.setRange(0.5, 20)
+            sb_depth.setValue(3.0)
+            layout.addRow("Depth (ms):", sb_depth)
+            params["depth_ms"] = sb_depth
+            
+            sb_mix = QDoubleSpinBox()
+            sb_mix.setRange(0, 1)
+            sb_mix.setValue(0.3)
+            layout.addRow("Mix:", sb_mix)
+            params["mix"] = sb_mix
             
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
@@ -200,7 +532,8 @@ class MainWindow(QMainWindow):
             final_params = {k: v.value() for k, v in params.items()}
             self.apply_effect_to_selection(effect_name, final_params)
 
-    def apply_effect_to_selection(self, effect_name, params):
+    def apply_effect_to_selection(self, effect_name: str, params: dict) -> None:
+        """Apply an effect to the current selection or entire track."""
         target_track_idx = -1
         selection = None
         
@@ -216,14 +549,48 @@ class MainWindow(QMainWindow):
             track = self.audio_engine.tracks[0]
             selection = (0, len(track.data)) if track.data is not None else None
 
-        if target_track_idx != -1 and selection:
-            start, end = selection
-            if self.audio_engine.apply_effect(effect_name, target_track_idx, start, end, **params):
-                self.statusBar().showMessage(f"Applied {effect_name}", 3000)
-            else:
-                self.statusBar().showMessage(f"Failed to apply {effect_name}", 3000)
-        else:
+        if target_track_idx == -1 or selection is None:
             self.statusBar().showMessage("No track or selection for effect", 3000)
+            return
+
+        start, end = selection
+        
+        # Map effect names to functions
+        effect_map = {
+            "gain": (fx.apply_gain, "Amplify"),
+            "fade_in": (lambda d, sr: fx.apply_fade_in(d), "Fade In"),
+            "fade_out": (lambda d, sr: fx.apply_fade_out(d), "Fade Out"),
+            "delay": (fx.apply_delay, "Delay"),
+            "reverb": (fx.apply_reverb, "Reverb"),
+            "lowpass": (fx.apply_lowpass, "Low-pass"),
+            "highpass": (fx.apply_highpass, "High-pass"),
+            "normalize": (lambda d, sr: fx.apply_normalize(d), "Normalize"),
+            "reverse": (lambda d, sr: fx.apply_reverse(d), "Reverse"),
+            "pitch_shift": (fx_vocal.apply_pitch_shift, "Pitch Shift"),
+            "compressor": (fx_vocal.apply_compressor, "Compressor"),
+            "deesser": (fx_vocal.apply_deesser, "De-esser"),
+            "chorus": (fx_vocal.apply_chorus, "Chorus"),
+        }
+        
+        if effect_name not in effect_map:
+            self.statusBar().showMessage(f"Unknown effect: {effect_name}", 3000)
+            return
+        
+        effect_func, display_name = effect_map[effect_name]
+        
+        success = self.audio_engine.apply_effect(
+            target_track_idx,
+            effect_func,
+            display_name,
+            start,
+            end,
+            **params
+        )
+        
+        if success:
+            self.statusBar().showMessage(f"Applied {display_name}", 3000)
+        else:
+            self.statusBar().showMessage(f"Failed to apply {display_name}", 3000)
 
     def split_at_playhead(self):
         pos = self.audio_engine.current_frame
@@ -288,19 +655,67 @@ class MainWindow(QMainWindow):
         tools_menu.addSeparator()
         
         # AI Separation Submenu
-        ai_menu = tools_menu.addMenu("AI & Separation")
+        ai_menu = tools_menu.addMenu("🎵 AI & Vocal Separation")
         
+        # Quick DSP methods
         hpss_action = QAction("Separate Harmonic/Percussive (Fast)", self)
+        hpss_action.setToolTip("Uses HPSS algorithm - fast but basic separation")
         hpss_action.triggered.connect(lambda: self.apply_tool_to_track("hpss"))
         ai_menu.addAction(hpss_action)
         
         karaoke_action = QAction("Separate Vocals (Karaoke DSP)", self)
+        karaoke_action.setToolTip("Center-channel cancellation - works on stereo tracks")
         karaoke_action.triggered.connect(lambda: self.apply_tool_to_track("karaoke"))
         ai_menu.addAction(karaoke_action)
         
-        demucs_action = QAction("Separate Vocals (AI - Demucs)", self)
+        ai_menu.addSeparator()
+        ai_menu.addAction(QAction("─── AI Methods (Higher Quality) ───", self))
+        
+        # AI methods
+        demucs_action = QAction("🤖 Separate Vocals (Demucs AI)", self)
+        demucs_action.setToolTip("State-of-the-art AI separation - requires torch & demucs")
         demucs_action.triggered.connect(lambda: self.apply_tool_to_track("demucs"))
         ai_menu.addAction(demucs_action)
+        
+        demucs_4stem_action = QAction("🤖 Separate 4 Stems (Demucs AI)", self)
+        demucs_4stem_action.setToolTip("Separates into Vocals, Drums, Bass, Other")
+        demucs_4stem_action.triggered.connect(lambda: self.apply_tool_to_track("demucs_4stem"))
+        ai_menu.addAction(demucs_4stem_action)
+        
+        spleeter_action = QAction("🎤 Separate Vocals (Spleeter)", self)
+        spleeter_action.setToolTip("Alternative AI separation - requires spleeter")
+        spleeter_action.triggered.connect(lambda: self.apply_tool_to_track("spleeter"))
+        ai_menu.addAction(spleeter_action)
+        
+        spleeter_4stem_action = QAction("🎤 Separate 4 Stems (Spleeter)", self)
+        spleeter_4stem_action.setToolTip("Spleeter 4-stem separation (vocals, drums, bass, other)")
+        spleeter_4stem_action.triggered.connect(lambda: self.apply_tool_to_track("spleeter_4stem"))
+        ai_menu.addAction(spleeter_4stem_action)
+        
+        ai_menu.addSeparator()
+        
+        auto_action = QAction("✨ Auto-Separate Vocals", self)
+        auto_action.setToolTip("Automatically uses the best available method")
+        auto_action.triggered.connect(lambda: self.apply_tool_to_track("auto"))
+        ai_menu.addAction(auto_action)
+
+        auto_4stem_action = QAction("✨ Auto-Separate 4 Stems", self)
+        auto_4stem_action.setToolTip("Best available 4-stem separation")
+        auto_4stem_action.triggered.connect(lambda: self.apply_tool_to_track("auto_4stem"))
+        ai_menu.addAction(auto_4stem_action)
+        
+        # Miku workflow helper
+        tools_menu.addSeparator()
+        miku_workflow = tools_menu.addMenu("🎤 Miku Ver. Workflow")
+        
+        miku_full_action = QAction("Full Miku Transformation (Separate + Apply)", self)
+        miku_full_action.setToolTip("Separates vocals and applies Miku Ver. preset automatically")
+        miku_full_action.triggered.connect(self.miku_full_workflow)
+        miku_workflow.addAction(miku_full_action)
+        
+        miku_info_action = QAction("ℹ️ About Miku Ver...", self)
+        miku_info_action.triggered.connect(self.show_miku_info)
+        miku_workflow.addAction(miku_info_action)
 
     def toggle_all_spectrograms(self, checked):
         for tw in self.track_widgets:
@@ -312,27 +727,144 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("No tracks available", 3000)
             return
             
-        # Select track
-        track_names = [f"{i+1}: {t.name}" for i, t in enumerate(self.audio_engine.tracks)]
-        item, ok = QInputDialog.getItem(self, "Select Track", f"Apply {tool_name} to:", track_names, 0, False)
+        idx = self.select_track_dialog("Select Track", f"Apply {tool_name} to:")
+        if idx is None:
+            return
+
+        # Define the task based on tool name
+        task_func = None
+        task_name = "Processing"
         
-        if ok and item:
-            idx = int(item.split(":")[0]) - 1
-            self.statusBar().showMessage(f"Running {tool_name} on {item}...", 5000)
+        if tool_name == "hpss":
+            task_func = lambda: self.audio_engine.separate_hpss(idx)
+            task_name = "HPSS Separation"
+        elif tool_name == "karaoke":
+            task_func = lambda: self.audio_engine.separate_vocals_dsp(idx)
+            task_name = "Karaoke DSP"
+        elif tool_name == "demucs":
+            task_func = lambda: self.audio_engine.separate_ai_demucs(idx, two_stems=True)
+            task_name = "Demucs AI Separation"
+        elif tool_name == "demucs_4stem":
+            task_func = lambda: self.audio_engine.separate_ai_demucs(idx, two_stems=False)
+            task_name = "Demucs 4-Stem Separation"
+        elif tool_name == "spleeter":
+            task_func = lambda: self.audio_engine.separate_vocals_spleeter(idx, stems=2)
+            task_name = "Spleeter AI"
+        elif tool_name == "spleeter_4stem":
+            task_func = lambda: self.audio_engine.separate_vocals_spleeter(idx, stems=4)
+            task_name = "Spleeter 4-Stem"
+        elif tool_name == "auto":
+            task_func = lambda: self.audio_engine.separate_vocals_auto(idx, two_stems=True)
+            task_name = "Auto Separation"
+        elif tool_name == "auto_4stem":
+            task_func = lambda: self.audio_engine.separate_vocals_auto(idx, two_stems=False)
+            task_name = "Auto 4-Stem Separation"
             
-            success = False
-            if tool_name == "hpss":
-                success = self.audio_engine.separate_hpss(idx)
-            elif tool_name == "karaoke":
-                success = self.audio_engine.separate_vocals_dsp(idx)
-            elif tool_name == "demucs":
-                # This might be slow, ideally background thread
-                success = self.audio_engine.separate_ai_demucs(idx)
+        if task_func:
+            self.run_async_task(task_func, f"Running {task_name}...")
+
+    def show_ai_install_help(self, tool_name):
+        """Show help dialog for installing AI dependencies."""
+        if tool_name in ["demucs", "demucs_4stem"]:
+            QMessageBox.warning(self, "Demucs Not Available",
+                "Demucs AI separation requires additional packages.\n\n"
+                "To install, run in your terminal:\n"
+                "pip install torch torchaudio demucs\n\n"
+                "Note: This requires ~2GB download and works best with GPU.\n"
+                "For CPU-only: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu")
+        elif tool_name == "spleeter":
+            QMessageBox.warning(self, "Spleeter Not Available",
+                "Spleeter separation requires additional packages.\n\n"
+                "To install, run in your terminal:\n"
+                "pip install spleeter\n\n"
+                "Note: First run will download models (~300MB).")
+        else:
+            QMessageBox.warning(self, "Tool Failed",
+                f"The tool '{tool_name}' failed to execute.\n"
+                "Check the console for error details.")
+
+    def miku_full_workflow(self) -> None:
+        """Full workflow: separate vocals + apply Miku Ver. preset."""
+        if not self.audio_engine.tracks:
+            self.statusBar().showMessage("No tracks available", 3000)
+            return
+        
+        idx = self.select_track_dialog("Miku Ver. Full Workflow", "Select track to transform:")
+        if idx is None:
+            return
+        
+        # Ask for Miku variant
+        variants = [
+            "Miku Ver. (Standard) - +4 semitones", 
+            "Miku Ver. Soft - +3 semitones (more natural)",
+            "Miku Ver. Hard - +5 semitones (more robotic)"
+        ]
+        variant, ok = QInputDialog.getItem(
+            self, "Select Miku Style",
+            "Choose the Miku variant:", variants, 0, False
+        )
+        
+        if not ok or not variant:
+            return
+        
+        # Map to parameters
+        if "Soft" in variant:
+            pitch, formant = 3.0, 1.10
+        elif "Hard" in variant:
+            pitch, formant = 5.0, 1.15
+        else:
+            pitch, formant = 4.0, 1.12
+            
+        def workflow_task():
+            # Step 1: Separate
+            orig_count = len(self.audio_engine.tracks)
+            
+            result_sep = self.audio_engine.separate_vocals(idx, two_stems=True)
+            if result_sep is not True:
+                return result_sep or "Failed to separate vocals."
                 
-            if success:
-                self.statusBar().showMessage(f"Tool {tool_name} completed", 3000)
+            # Find new vocal track
+            vocals_idx = -1
+            for i in range(orig_count, len(self.audio_engine.tracks)):
+                if "Vocals" in self.audio_engine.tracks[i].name:
+                    vocals_idx = i
+                    break
+            
+            if vocals_idx == -1:
+                return "Separation finished but could not find vocal track."
+                
+            # Step 2: Apply Miku preset
+            effect_func = lambda d, sr: fx_vocal.apply_miku_voice_chain(d, sr, pitch, formant)
+            success_preset = self.audio_engine.apply_effect(vocals_idx, effect_func, "Miku Ver.")
+            
+            if success_preset:
+                self.audio_engine.tracks[vocals_idx].name = f"{self.audio_engine.tracks[idx].name} (Miku Ver.)"
+                return True
             else:
-                self.statusBar().showMessage(f"Tool {tool_name} failed", 3000)
+                return "Failed to apply Miku preset."
+
+        self.run_async_task(workflow_task, "Running Miku Transformation (Separate + Effect)...")
+
+    def show_miku_info(self):
+        """Show information about Miku Ver. preset."""
+        QMessageBox.information(self, "About Miku Ver. (High-Fidelity)",
+            "🎤 Miku Ver. Standard (High-Fidelity Update)\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "This preset transforms human vocals into a faithful Hatsune Miku representation,\n"
+            "emulating the iconic digital character from the Vocaloid engine.\n\n"
+            "The new processing chain includes:\n"
+            "• Chromatic Pitch Quantization (Robotic hard-tune artifacts)\n"
+            "• Improved Pitch shifting (+4 semitones)\n"
+            "• V4x-Standard Formant shifting (Synthetic character)\n"
+            "• Digital Compression (Locked-in dynamic response)\n"
+            "• De-essing (Clean high-end control)\n"
+            "• High-Harmonic Vocoder Layer (The characteristic digital buzz)\n"
+            "• Multi-Voice Chorus (Widened synthetic texture)\n"
+            "• Miku-Curve Signature EQ (Sparkle and clarity focus)\n\n"
+            "For best results:\n"
+            "1. USE CLEAN VOCALS ONLY. This is not for full tracks.\n"
+            "2. Use the 'Full Miku Transformation' to separate vocals first.\n"
+            "3. Ensure the vocal track has minimal background noise.")
 
     def undo(self):
         if self.audio_engine.undo():
