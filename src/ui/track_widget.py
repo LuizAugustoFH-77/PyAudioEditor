@@ -7,9 +7,13 @@ import logging
 from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import (
+    Qt, QSize, QPropertyAnimation, QSequentialAnimationGroup, QPauseAnimation,
+    QEasingCurve, pyqtProperty
+)
+from PyQt6.QtGui import QPainter, QPalette
 import qtawesome as qta
 
 from .waveform_view import WaveformWidget
@@ -21,11 +25,118 @@ if TYPE_CHECKING:
 logger = logging.getLogger("PyAudacity")
 
 
+class SlidingTextLabel(QWidget):
+    """Widget that animates long text back and forth for readability."""
+
+    def __init__(self, text: str = "", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._text = text
+        self._offset = 0.0
+        self._max_offset = 0.0
+        self._padding = 2
+
+        self._pause_start = QPauseAnimation(700, self)
+        self._pause_end = QPauseAnimation(700, self)
+        self._anim_forward = QPropertyAnimation(self, b"offset", self)
+        self._anim_backward = QPropertyAnimation(self, b"offset", self)
+        self._anim_forward.setEasingCurve(QEasingCurve.Type.InOutSine)
+        self._anim_backward.setEasingCurve(QEasingCurve.Type.InOutSine)
+
+        self._anim_group = QSequentialAnimationGroup(self)
+        self._anim_group.addAnimation(self._pause_start)
+        self._anim_group.addAnimation(self._anim_forward)
+        self._anim_group.addAnimation(self._pause_end)
+        self._anim_group.addAnimation(self._anim_backward)
+        self._anim_group.setLoopCount(-1)
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(self.fontMetrics().height())
+        self.setToolTip(text)
+
+    def text(self) -> str:
+        return self._text
+
+    def setText(self, text: str) -> None:
+        if text == self._text:
+            return
+        self._text = text
+        self.setToolTip(text)
+        self._refresh_animation()
+        self.update()
+
+    def _get_offset(self) -> float:
+        return self._offset
+
+    def _set_offset(self, value: float) -> None:
+        self._offset = value
+        self.update()
+
+    offset = pyqtProperty(float, _get_offset, _set_offset)
+
+    def _refresh_animation(self) -> None:
+        if not self._text:
+            self._anim_group.stop()
+            self._offset = 0.0
+            return
+
+        available = max(0, self.width() - self._padding * 2)
+        if available <= 0:
+            self._anim_group.stop()
+            self._offset = 0.0
+            return
+
+        text_width = self.fontMetrics().horizontalAdvance(self._text)
+        max_offset = max(0.0, float(text_width - available))
+
+        if max_offset <= 0:
+            self._anim_group.stop()
+            self._offset = 0.0
+            self.update()
+            return
+
+        if abs(max_offset - self._max_offset) < 1.0 and self._anim_group.state() != 0:
+            return
+
+        self._max_offset = max_offset
+        duration_ms = max(2500, int((max_offset / 40.0) * 1000))
+        duration_ms = min(duration_ms, 14000)
+
+        self._anim_group.stop()
+        self._anim_forward.setStartValue(0.0)
+        self._anim_forward.setEndValue(max_offset)
+        self._anim_forward.setDuration(duration_ms)
+        self._anim_backward.setStartValue(max_offset)
+        self._anim_backward.setEndValue(0.0)
+        self._anim_backward.setDuration(duration_ms)
+        self._anim_group.start()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.setClipRect(self.rect())
+        painter.setPen(self.palette().color(QPalette.ColorRole.WindowText))
+
+        metrics = self.fontMetrics()
+        y = (self.height() + metrics.ascent() - metrics.descent()) // 2
+        x = int(self._padding - self._offset)
+        painter.drawText(x, y, self._text)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._refresh_animation()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._refresh_animation()
+
+
 class TrackWidget(QWidget):
     """
     Widget representing a single audio track with controls and waveform display.
     """
-    
+
+    CONTROLS_WIDTH = 140
+
     def __init__(
         self, 
         track: "AudioTrack", 
@@ -80,7 +191,7 @@ class TrackWidget(QWidget):
     def _create_controls_panel(self) -> None:
         """Create the left control panel."""
         self._controls_widget = QWidget()
-        self._controls_widget.setFixedWidth(140)
+        self._controls_widget.setFixedWidth(self.CONTROLS_WIDTH)
         self._controls_widget.setStyleSheet(
             "background-color: #1c212c; border-right: 1px solid #2c3444; "
             "border-top-left-radius: 6px; border-bottom-left-radius: 6px;"
@@ -108,11 +219,11 @@ class TrackWidget(QWidget):
         # Name row
         name_row = QHBoxLayout()
         
-        self._name_label = QLabel(self._track.name)
+        self._name_label = SlidingTextLabel(self._track.name)
         self._name_label.setStyleSheet(
             "font-weight: 600; color: #e6e8eb; font-size: 11px;"
         )
-        self._name_label.setWordWrap(True)
+        self._name_label.setMinimumWidth(0)
         
         self._btn_close = QPushButton()
         self._btn_close.setIcon(qta.icon("fa5s.times", color="#9aa3ad"))
@@ -124,8 +235,7 @@ class TrackWidget(QWidget):
         )
         self._btn_close.clicked.connect(self._on_close_clicked)
         
-        name_row.addWidget(self._name_label)
-        name_row.addStretch()
+        name_row.addWidget(self._name_label, stretch=1)
         name_row.addWidget(self._btn_close)
         
         # Mute/Solo buttons
@@ -192,7 +302,7 @@ class TrackWidget(QWidget):
         controls_layout.addLayout(btn_row)
         controls_layout.addLayout(vol_layout)
         controls_layout.addStretch()
-    
+
     def _on_close_clicked(self) -> None:
         """Handle close button click."""
         index = self._get_track_index()

@@ -4,6 +4,7 @@ Provides the primary user interface for audio editing.
 """
 from __future__ import annotations
 import logging
+import os
 import time
 from typing import Optional, Callable, Any
 
@@ -11,13 +12,14 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QScrollBar, QScrollArea,
     QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox,
-    QInputDialog, QMessageBox, QProgressBar, QFrame
+    QInputDialog, QMessageBox, QProgressBar, QFrame, QListWidget, QSplitter, QTextBrowser
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, QThread, pyqtSignal
-from PyQt6.QtGui import QAction, QKeySequence, QCloseEvent, QGuiApplication
+from PyQt6.QtGui import QAction, QKeySequence, QCloseEvent, QGuiApplication, QResizeEvent
 import qtawesome as qta
 
 from src.core.audio_engine import AudioEngine
+from src.core.track import AudioTrack
 from src.core.types import SeparationResult
 from src.core import separation as separation_core
 from src.core import effects_basic as fx
@@ -134,6 +136,7 @@ class MainWindow(QMainWindow):
 
         # Async task context (used to apply results safely on UI thread)
         self._async_context: dict[str, Any] = {}
+        self._is_loading = False
 
         
         # Update timer (GUI update 30fps)
@@ -170,6 +173,159 @@ class MainWindow(QMainWindow):
             available.y() + (available.height() - height) // 2,
         )
 
+    def create_about_menu(self) -> None:
+        menubar = self.menuBar()
+        about_menu = menubar.addMenu("&About")
+
+        quick_topics = [
+            ("Getting Started", "getting_started"),
+            ("Editing Basics", "editing"),
+            ("Effects and Presets", "effects"),
+            ("AI and Separation", "ai"),
+            ("Shortcuts", "shortcuts"),
+        ]
+
+        for label, key in quick_topics:
+            action = QAction(label, self)
+            action.triggered.connect(lambda checked, k=key: self._show_about_dialog(k))
+            about_menu.addAction(action)
+
+        about_menu.addSeparator()
+
+        all_action = QAction("All Topics...", self)
+        all_action.triggered.connect(lambda: self._show_about_dialog(None))
+        about_menu.addAction(all_action)
+
+    def _show_about_dialog(self, initial_topic: Optional[str]) -> None:
+        topics = {
+            "getting_started": {
+                "title": "Getting Started",
+                "html": (
+                    "<h2>Getting Started</h2>"
+                    "<ul>"
+                    "<li><b>File &gt; Open Project/File</b>: replace the current project.</li>"
+                    "<li><b>File &gt; Import Audio</b>: add a new track to the project.</li>"
+                    "<li><b>File &gt; Export As</b>: mix down and export to WAV/MP3/FLAC/OGG.</li>"
+                    "</ul>"
+                ),
+            },
+            "workspace": {
+                "title": "Workspace",
+                "html": (
+                    "<h2>Workspace</h2>"
+                    "<ul>"
+                    "<li><b>Tracks panel</b>: mute/solo, volume, and close per track.</li>"
+                    "<li><b>Waveform view</b>: scroll to zoom, drag to select.</li>"
+                    "<li><b>Time ruler</b>: click or drag to seek.</li>"
+                    "<li><b>Transport</b>: play/pause, stop, and time display.</li>"
+                    "</ul>"
+                ),
+            },
+            "editing": {
+                "title": "Editing Basics",
+                "html": (
+                    "<h2>Editing Basics</h2>"
+                    "<ul>"
+                    "<li>Cut, copy, paste, and delete operate on the selection.</li>"
+                    "<li>Split trims at the playhead to create segment markers.</li>"
+                    "<li>Undo/redo is available across edits and effects.</li>"
+                    "</ul>"
+                ),
+            },
+            "effects": {
+                "title": "Effects and Presets",
+                "html": (
+                    "<h2>Effects and Presets</h2>"
+                    "<ul>"
+                    "<li>Effects menu includes gain, fades, delay, reverb, and filters.</li>"
+                    "<li>Vocal processing adds pitch shift, compressor, de-esser, and chorus.</li>"
+                    "<li>Presets chain multiple effects for common styles.</li>"
+                    "</ul>"
+                ),
+            },
+            "ai": {
+                "title": "AI and Separation",
+                "html": (
+                    "<h2>AI and Separation</h2>"
+                    "<ul>"
+                    "<li>Tools menu provides DSP and AI options for separation.</li>"
+                    "<li>Choose CPU/GPU backends when available for faster processing.</li>"
+                    "</ul>"
+                ),
+            },
+            "shortcuts": {
+                "title": "Shortcuts",
+                "html": (
+                    "<h2>Shortcuts</h2>"
+                    "<ul>"
+                    "<li><code>Ctrl+O</code> Open, <code>Ctrl+S</code> Export</li>"
+                    "<li><code>Ctrl+Z</code> Undo, <code>Ctrl+Y</code> Redo</li>"
+                    "<li><code>Ctrl+C</code> Copy, <code>Ctrl+X</code> Cut</li>"
+                    "<li><code>Ctrl+V</code> Paste, <code>Del</code> Delete</li>"
+                    "<li><code>Ctrl+A</code> Select all</li>"
+                    "</ul>"
+                ),
+            },
+            "tips": {
+                "title": "Tips",
+                "html": (
+                    "<h2>Tips</h2>"
+                    "<ul>"
+                    "<li>Use the spectrogram toggle for a frequency view.</li>"
+                    "<li>Large files display downsampled waveforms for smooth scrolling.</li>"
+                    "</ul>"
+                ),
+            },
+        }
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("About PyAudioEditor")
+        dialog.setMinimumSize(720, 420)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        layout.addWidget(splitter)
+
+        topic_list = QListWidget()
+        topic_list.setMinimumWidth(200)
+
+        content = QTextBrowser()
+        content.setOpenExternalLinks(False)
+        content.setStyleSheet(
+            "QTextBrowser { background-color: #11151c; border: 1px solid #252c3a; "
+            "border-radius: 6px; padding: 12px; }"
+        )
+
+        splitter.addWidget(topic_list)
+        splitter.addWidget(content)
+        splitter.setStretchFactor(1, 1)
+
+        for key, data in topics.items():
+            topic_list.addItem(data["title"])
+
+        keys = list(topics.keys())
+
+        def set_topic(index: int) -> None:
+            if index < 0 or index >= len(keys):
+                return
+            content.setHtml(topics[keys[index]]["html"])
+
+        def on_topic_changed() -> None:
+            row = topic_list.currentRow()
+            set_topic(row)
+
+        topic_list.currentRowChanged.connect(lambda _: on_topic_changed())
+
+        start_index = 0
+        if initial_topic and initial_topic in topics:
+            start_index = keys.index(initial_topic)
+        topic_list.setCurrentRow(start_index)
+        set_topic(start_index)
+
+        dialog.exec()
+
     def closeEvent(self, event: QCloseEvent) -> None:
         """Ensure audio stream and worker threads stop before Qt teardown."""
         try:
@@ -190,6 +346,10 @@ class MainWindow(QMainWindow):
                 self.audio_engine.cleanup()
         finally:
             super().closeEvent(event)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_time_ruler_insets()
 
     def create_toolbar(self):
         # File & History Toolbar
@@ -427,6 +587,33 @@ class MainWindow(QMainWindow):
             self.progress_dialog.close()
             
         if success:
+            if isinstance(result, dict) and result.get("kind") == "load_file":
+                clear_project = bool(self._async_context.get("clear_project"))
+                self._is_loading = False
+                self._async_context = {}
+                if not result.get("success"):
+                    msg = result.get("error") or "Failed to load audio file."
+                    self.statusBar().showMessage(msg, 6000)
+                    QMessageBox.warning(self, "Load Failed", msg)
+                    return
+
+                if clear_project:
+                    self.audio_engine.clear_project()
+
+                if not self.audio_engine.tracks:
+                    self.audio_engine.samplerate = int(
+                        result.get("sr", self.audio_engine.samplerate)
+                    )
+
+                new_track = AudioTrack(name=result.get("track_name", "Track"))
+                new_track.set_data(result["data"], self.audio_engine.samplerate)
+                self.audio_engine.add_track(new_track)
+
+                label = "Opened" if clear_project else "Imported"
+                file_path = result.get("file_path", "")
+                self.statusBar().showMessage(f"{label}: {file_path}", 5000)
+                return
+
             # If this task returned a SeparationResult, apply it on the UI thread here.
             if isinstance(result, SeparationResult):
                 if not result.success:
@@ -473,7 +660,14 @@ class MainWindow(QMainWindow):
             # Default refresh
             self.refresh_track_list()
         else:
-            QMessageBox.critical(self, "Error", f"An error occurred during background processing:\n{result}")
+            if self._async_context.get("kind") == "load_file":
+                self._is_loading = False
+                self._async_context = {}
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"An error occurred during background processing:\n{result}",
+            )
 
     def show_effect_dialog(self, effect_name):
 
@@ -682,6 +876,7 @@ class MainWindow(QMainWindow):
 
     def create_menus(self):
         menubar = self.menuBar()
+        menubar.setNativeMenuBar(False)
         
         # File Menu
         file_menu = menubar.addMenu("&File")
@@ -710,6 +905,7 @@ class MainWindow(QMainWindow):
 
         self.create_effects_menu()
         self.create_tools_menu()
+        self.create_about_menu()
 
     def create_tools_menu(self):
         menubar = self.menuBar()
@@ -1026,12 +1222,16 @@ class MainWindow(QMainWindow):
         # Time Ruler
         self.time_ruler = TimeRulerWidget()
         self.time_ruler.seekRequested.connect(self.audio_engine.seek)
+        self.time_ruler.set_left_offset(TrackWidget.CONTROLS_WIDTH)
         self.main_layout.addWidget(self.time_ruler)
 
         # Scroll Area for Tracks
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.verticalScrollBar().rangeChanged.connect(
+            self._update_time_ruler_insets
+        )
         
         self.tracks_container = QWidget()
         self.tracks_layout = QVBoxLayout()
@@ -1050,6 +1250,7 @@ class MainWindow(QMainWindow):
         self.main_layout.addWidget(self.timeline_scrollbar)
         
         self.track_widgets = [] # Keep references
+        self._update_time_ruler_insets()
 
     def refresh_track_list(self):
         from src.utils.logger import logger
@@ -1096,7 +1297,19 @@ class MainWindow(QMainWindow):
 
         # Force layout update
         self.tracks_container.update()
+        self._update_time_ruler_insets()
         logger.info("Track list refresh complete")
+
+    def _update_time_ruler_insets(self, *args) -> None:
+        """Align time ruler with scroll area insets."""
+        if not hasattr(self, "scroll_area"):
+            return
+
+        scrollbar = self.scroll_area.verticalScrollBar()
+        right_inset = 0
+        if scrollbar.isVisible():
+            right_inset = scrollbar.width() or scrollbar.sizeHint().width()
+        self.time_ruler.set_right_inset(right_inset)
 
     def periodic_update(self):
         """Updates UI elements (playhead, time label) at 30fps."""
@@ -1122,7 +1335,10 @@ class MainWindow(QMainWindow):
         
         # Update global state from sender
         self.global_visible_len = max(100, min(sender.visible_len, max_samples))
-        self.global_visible_start = max(0, min(sender.visible_start, max_samples - self.global_visible_len))
+        self.global_visible_start = max(
+            0,
+            min(sender.visible_start, max_samples - self.global_visible_len),
+        )
         
         # Sync all tracks
         for tw in self.track_widgets:
@@ -1130,6 +1346,15 @@ class MainWindow(QMainWindow):
             tw.waveform.blockSignals(True)
             tw.waveform.set_view(self.global_visible_start, self.global_visible_len)
             tw.waveform.blockSignals(False)
+
+        # Clamp sender too to avoid ruler/playhead drift near edges
+        if (
+            sender.visible_start != self.global_visible_start
+            or sender.visible_len != self.global_visible_len
+        ):
+            sender.blockSignals(True)
+            sender.set_view(self.global_visible_start, self.global_visible_len)
+            sender.blockSignals(False)
         
         self.update_scrollbar_range()
 
@@ -1237,34 +1462,98 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Paste failed (Empty clipboard?)", 3000)
 
     def open_file_dialog(self):
+        if self._is_loading:
+            self.statusBar().showMessage("Already loading audio...", 2000)
+            return
+
         if self.audio_engine.tracks:
-            reply = QMessageBox.question(self, "Open File", 
-                                       "Opening a new file will clear the current project. Continue?",
-                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            reply = QMessageBox.question(
+                self,
+                "Open File",
+                "Opening a new file will clear the current project. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
             if reply == QMessageBox.StandardButton.No:
                 return
-        
-        self.audio_engine.clear_project()
-        self.import_file_dialog()
+
+        self._select_and_load_audio(clear_project=True, dialog_title="Open Audio File")
 
     def import_file_dialog(self):
+        if self._is_loading:
+            self.statusBar().showMessage("Already loading audio...", 2000)
+            return
+
+        self._select_and_load_audio(clear_project=False, dialog_title="Import Audio File")
+
+    def _select_and_load_audio(self, clear_project: bool, dialog_title: str) -> None:
         from src.utils.logger import logger
-        logger.info("Opening import file dialog")
-        
-        # Pause if playing
+        logger.info("Opening audio file dialog: %s", dialog_title)
+
         if self.audio_engine.is_playing:
             self.audio_engine.pause()
-            
-        file_path, _ = QFileDialog.getOpenFileName(self, "Import Audio File", "", "Audio Files (*.wav *.mp3 *.flac *.ogg)")
-        if file_path:
-            logger.info(f"User selected: {file_path}")
-            success = self.audio_engine.load_file(file_path)
-            if success:
-                logger.debug(f"File {file_path} loaded successfully")
-                self.statusBar().showMessage(f"Imported: {file_path}")
-            else:
-                logger.error(f"Failed to load file: {file_path}")
-                self.statusBar().showMessage(f"Failed to load: {file_path}", 5000)
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            dialog_title,
+            "",
+            "Audio Files (*.wav *.mp3 *.flac *.ogg)",
+        )
+        if not file_path:
+            return
+
+        logger.info("User selected: %s", file_path)
+        self._start_audio_load(file_path, clear_project)
+
+    def _start_audio_load(self, file_path: str, clear_project: bool) -> None:
+        if self._is_loading:
+            return
+
+        if self.audio_engine.is_playing:
+            self.audio_engine.pause()
+
+        target_sr = None
+        if not clear_project and self.audio_engine.tracks:
+            target_sr = self.audio_engine.samplerate
+
+        self._async_context = {
+            "kind": "load_file",
+            "clear_project": clear_project,
+        }
+        self._is_loading = True
+        task_name = f"Loading {os.path.basename(file_path)}..."
+        task_func = lambda: self._load_audio_file_worker(file_path, target_sr)
+        self.run_async_task(task_func, task_name)
+
+    def _load_audio_file_worker(
+        self,
+        file_path: str,
+        target_sr: Optional[int],
+    ) -> dict[str, Any]:
+        try:
+            import librosa
+            import numpy as np
+
+            data, loaded_sr = librosa.load(file_path, sr=target_sr, mono=False)
+            if data.ndim > 1:
+                data = data.T
+
+            data = data.astype(np.float32)
+
+            return {
+                "kind": "load_file",
+                "success": True,
+                "file_path": file_path,
+                "track_name": os.path.basename(file_path),
+                "data": data,
+                "sr": int(loaded_sr),
+            }
+        except Exception as exc:
+            return {
+                "kind": "load_file",
+                "success": False,
+                "file_path": file_path,
+                "error": str(exc),
+            }
 
     def export_file_dialog(self):
         if not self.audio_engine.tracks:

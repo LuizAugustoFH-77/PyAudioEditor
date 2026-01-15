@@ -41,6 +41,7 @@ class TimeRulerWidget(QWidget):
         
         # Layout
         self._left_offset: int = 140  # Match TrackWidget controls width
+        self._right_inset: int = 0
         
         # Playhead state
         self._playhead_sample: int = 0
@@ -67,6 +68,16 @@ class TimeRulerWidget(QWidget):
         self._total_samples = total
         self._samplerate = sr
         self.update()
+
+    def set_left_offset(self, value: int) -> None:
+        """Set left inset to align with track controls."""
+        self._left_offset = max(0, value)
+        self.update()
+
+    def set_right_inset(self, value: int) -> None:
+        """Set right inset to align with scrollbars."""
+        self._right_inset = max(0, value)
+        self.update()
     
     def set_playhead(self, sample: int) -> None:
         """Update playhead position."""
@@ -85,7 +96,7 @@ class TimeRulerWidget(QWidget):
         if self._visible_len <= 0 or self._samplerate <= 0:
             return
         
-        width = self.width() - self._left_offset
+        width = self.width() - self._left_offset - self._right_inset
         if width <= 0:
             return
         
@@ -162,19 +173,24 @@ class TimeRulerWidget(QWidget):
         playhead_offset = self._playhead_sample - self._visible_start
         
         if 0 <= playhead_offset <= self._visible_len:
-            ph_x = (playhead_offset / self._visible_len) * width
+            draw_width = max(1, width - 1)
+            ph_x = (playhead_offset / self._visible_len) * draw_width
+            x = int(round(ph_x))
             
             # Vertical line
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
             painter.setPen(QPen(self._playhead_color, 1))
-            painter.drawLine(int(ph_x), 0, int(ph_x), self.height())
+            painter.drawLine(x, 0, x, self.height())
+            painter.restore()
             
             # Triangle handle
             handle_w = 12
             handle_h = 10
             triangle = QPolygonF([
-                QPointF(ph_x - handle_w / 2, self.height() - handle_h),
-                QPointF(ph_x + handle_w / 2, self.height() - handle_h),
-                QPointF(ph_x, self.height())
+                QPointF(x - handle_w / 2, self.height() - handle_h),
+                QPointF(x + handle_w / 2, self.height() - handle_h),
+                QPointF(x, self.height())
             ])
             
             painter.setBrush(self._playhead_color)
@@ -183,22 +199,23 @@ class TimeRulerWidget(QWidget):
             
             # Top indicator
             painter.setPen(QPen(self._playhead_color, 2))
-            painter.drawLine(int(ph_x), 0, int(ph_x), 5)
+            painter.drawLine(x, 0, x, 5)
     
     def mousePressEvent(self, event) -> None:
         """Handle click to seek or start playhead drag."""
         x = event.position().x()
         
-        if x < self._left_offset:
+        if x < self._left_offset or x > (self.width() - self._right_inset):
             return
         
-        width = self.width() - self._left_offset
+        width = self.width() - self._left_offset - self._right_inset
         if width <= 0:
             return
         
         # Check for playhead hit
         playhead_offset = self._playhead_sample - self._visible_start
-        ph_x = (playhead_offset / self._visible_len) * width + self._left_offset
+        draw_width = max(1, width - 1)
+        ph_x = (playhead_offset / self._visible_len) * draw_width + self._left_offset
         
         if abs(x - ph_x) < 15:
             self._dragging_playhead = True
@@ -215,7 +232,7 @@ class TimeRulerWidget(QWidget):
             return
         
         x = event.position().x()
-        width = self.width() - self._left_offset
+        width = self.width() - self._left_offset - self._right_inset
         
         if width <= 0:
             return

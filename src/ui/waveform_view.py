@@ -121,8 +121,9 @@ class WaveformWidget(QWidget):
 
         self._playhead_sample = sample_index
 
-        if self._visible_len > 0 and self.rect().width() > 0:
-            ph_x = int(((sample_index - self._visible_start) / self._visible_len) * self.rect().width())
+        if self._visible_len > 0 and self.rect().width() > 1:
+            draw_width = self.rect().width() - 1
+            ph_x = int(round(((sample_index - self._visible_start) / self._visible_len) * draw_width))
             if self._last_playhead_x is not None:
                 x_min = min(self._last_playhead_x, ph_x) - 2
                 x_max = max(self._last_playhead_x, ph_x) + 2
@@ -393,9 +394,10 @@ class WaveformWidget(QWidget):
         """Draw playhead indicator."""
         offset = self._playhead_sample - self._visible_start
         if 0 <= offset <= self._visible_len:
-            ph_x = (offset / self._visible_len) * width
+            draw_width = max(1, width - 1)
+            ph_x = (offset / self._visible_len) * draw_width
             painter.setPen(QPen(self._playhead_color, 1))
-            painter.drawLine(int(ph_x), 0, int(ph_x), height)
+            painter.drawLine(int(round(ph_x)), 0, int(round(ph_x)), height)
     
     def _draw_splits(self, painter: QPainter, height: int, width: int) -> None:
         """Draw split point markers."""
