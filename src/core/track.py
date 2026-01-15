@@ -40,7 +40,7 @@ class AudioTrack:
         Set audio data and samplerate.
         Returns self for fluent API chaining.
         """
-        self.data = data.astype(np.float32) if data.dtype != np.float32 else data
+        self.data = np.ascontiguousarray(data, dtype=np.float32)
         self.samplerate = samplerate
         return self
     

@@ -41,8 +41,15 @@ ruff format src/
 # Basic installation
 pip install -r requirements.txt
 
-# With AI vocal separation (Demucs)
+# With AI vocal separation (Demucs) - CPU only
 pip install -r requirements.txt torch torchaudio demucs
+
+# With AI vocal separation + AMD GPU support (DirectML)
+pip install -r requirements.txt torch-directml demucs
+
+# With AI vocal separation + NVIDIA GPU support (CUDA)
+pip install -r requirements.txt demucs
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
 # Development installation
 pip install -e ".[dev]"
@@ -50,6 +57,41 @@ pip install -e ".[dev]"
 # Full installation with all optional features
 pip install -e ".[all]"
 ```
+
+## GPU Support
+
+### AMD GPUs (RX 400/500/5000/6000/7000 series) on Windows
+Use **DirectML** backend:
+```bash
+pip install torch-directml
+```
+The application will automatically detect your AMD GPU via DirectML.
+
+### AMD GPUs (Recommended for GPU separation): ONNX Runtime + DirectML
+Demucs via PyTorch is not reliably compatible with DirectML for AMD GPUs. For GPU-accelerated
+separation on AMD, prefer the ONNX path:
+```bash
+pip install onnxruntime-directml
+```
+Then in the app use **Tools → AI & Vocal Separation → Separate Vocals (ONNX DirectML)** and
+configure an MDX-style `.onnx` model via **Configure ONNX Model...**.
+
+For **4-stem separation on GPU**, use **Tools → AI & Vocal Separation → Separate 4 Stems (ONNX DirectML)**.
+This requires **multiple** MDX-style ONNX models (at minimum: Vocals, Drums, Bass). Configure them via
+**Configure ONNX Models (4-Stem)...**. If you don't provide an "Other" model, the app computes:
+$$\text{Other} = \text{Mix} - (\text{Vocals} + \text{Drums} + \text{Bass})$$
+
+### NVIDIA GPUs
+Use **CUDA** backend:
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
+
+### Device Selection
+When running AI separation (Demucs, 4-stem), a dialog will appear allowing you to choose:
+- **CPU**: Works everywhere, slower
+- **DirectML**: For AMD/Intel GPUs on Windows
+- **CUDA**: For NVIDIA GPUs
 
 ## Project Structure
 

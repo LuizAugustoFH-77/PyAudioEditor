@@ -544,11 +544,7 @@ class AudioEngine(QObject):
         if track is None or track.data is None:
             return "Track not found or empty."
         
-        result = separation.separate_vocals_auto(
-            track.data, 
-            self.samplerate, 
-            two_stems
-        )
+        result = separation.separate_vocals_auto(track.data, self.samplerate, two_stems)
         
         if not result.success:
             logger.error("Vocal separation failed: %s", result.error)

@@ -34,9 +34,9 @@ class TimeRulerWidget(QWidget):
         self._samplerate: int = 44100
         
         # Colors
-        self._bg_color = QColor(30, 30, 30)
-        self._text_color = QColor(200, 200, 200)
-        self._line_color = QColor(100, 100, 100)
+        self._bg_color = QColor(18, 21, 28)
+        self._text_color = QColor(200, 210, 220)
+        self._line_color = QColor(78, 90, 105)
         self._playhead_color = QColor(*WAVEFORM_CONFIG.playhead_color)
         
         # Layout
@@ -80,7 +80,7 @@ class TimeRulerWidget(QWidget):
         
         # Background
         painter.fillRect(self.rect(), self._bg_color)
-        painter.fillRect(0, 0, self._left_offset, self.height(), QColor(40, 40, 40))
+        painter.fillRect(0, 0, self._left_offset, self.height(), QColor(24, 28, 36))
         
         if self._visible_len <= 0 or self._samplerate <= 0:
             return
@@ -118,7 +118,7 @@ class TimeRulerWidget(QWidget):
         first_tick = math.floor(start_time / interval) * interval
         
         painter.setPen(QPen(self._line_color, 1))
-        painter.setFont(QFont("Arial", 8))
+        painter.setFont(QFont("Bahnschrift", 8))
         
         curr_tick = first_tick
         while curr_tick <= end_time:

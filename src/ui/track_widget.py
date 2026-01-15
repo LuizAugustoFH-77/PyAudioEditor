@@ -73,14 +73,17 @@ class TrackWidget(QWidget):
         self._layout.addWidget(self._controls_widget)
         self._layout.addWidget(self._waveform, stretch=1)
         
-        self.setStyleSheet("background-color: #222; border-bottom: 1px solid #333;")
+        self.setStyleSheet(
+            "background-color: #171c25; border: 1px solid #252c3a; border-radius: 6px;"
+        )
     
     def _create_controls_panel(self) -> None:
         """Create the left control panel."""
         self._controls_widget = QWidget()
         self._controls_widget.setFixedWidth(140)
         self._controls_widget.setStyleSheet(
-            "background-color: #2a2a2a; border-right: 1px solid #444;"
+            "background-color: #1c212c; border-right: 1px solid #2c3444; "
+            "border-top-left-radius: 6px; border-bottom-left-radius: 6px;"
         )
         
         controls_layout = QVBoxLayout()
@@ -91,15 +94,15 @@ class TrackWidget(QWidget):
         # Button style
         btn_style = """
             QPushButton {
-                background-color: #3a3a3a;
-                border: 1px solid #555;
-                border-radius: 3px;
-                padding: 2px;
+                background-color: #1f2533;
+                border: 1px solid #2c3444;
+                border-radius: 6px;
+                padding: 3px;
                 min-width: 28px;
                 min-height: 24px;
             }
-            QPushButton:hover { background-color: #4a4a4a; }
-            QPushButton:pressed { background-color: #222; }
+            QPushButton:hover { background-color: #283145; }
+            QPushButton:pressed { background-color: #1a202d; }
         """
         
         # Name row
@@ -107,12 +110,12 @@ class TrackWidget(QWidget):
         
         self._name_label = QLabel(self._track.name)
         self._name_label.setStyleSheet(
-            "font-weight: bold; color: #ddd; font-size: 11px;"
+            "font-weight: 600; color: #e6e8eb; font-size: 11px;"
         )
         self._name_label.setWordWrap(True)
         
         self._btn_close = QPushButton()
-        self._btn_close.setIcon(qta.icon("fa5s.times", color="#888"))
+        self._btn_close.setIcon(qta.icon("fa5s.times", color="#9aa3ad"))
         self._btn_close.setIconSize(QSize(10, 10))
         self._btn_close.setFixedSize(16, 16)
         self._btn_close.setStyleSheet(
@@ -136,7 +139,7 @@ class TrackWidget(QWidget):
         self._btn_mute.toggled.connect(self._toggle_mute)
         self._btn_mute.setStyleSheet(
             btn_style + 
-            "QPushButton:checked { background-color: #a82a2a; border-color: #ff5555; }"
+            "QPushButton:checked { background-color: #7a2a2f; border-color: #f04f5a; }"
         )
         
         self._btn_solo = QPushButton()
@@ -146,7 +149,7 @@ class TrackWidget(QWidget):
         self._btn_solo.toggled.connect(self._toggle_solo)
         self._btn_solo.setStyleSheet(
             btn_style + 
-            "QPushButton:checked { background-color: #2a8a2a; border-color: #55ff55; }"
+            "QPushButton:checked { background-color: #1f6b4d; border-color: #5ad37a; }"
         )
         
         btn_row.addWidget(self._btn_mute)
@@ -159,19 +162,19 @@ class TrackWidget(QWidget):
         self._volume_slider.setFixedHeight(15)
         self._volume_slider.setStyleSheet("""
             QSlider::groove:horizontal {
-                border: 1px solid #555;
+                border: 1px solid #2c3444;
                 height: 4px;
-                background: #111;
+                background: #10131a;
                 border-radius: 2px;
             }
             QSlider::handle:horizontal {
-                background: #888;
-                width: 12px;
-                height: 12px;
+                background: #2cc7c9;
+                width: 14px;
+                height: 14px;
                 margin: -4px 0;
-                border-radius: 6px;
+                border-radius: 7px;
             }
-            QSlider::handle:horizontal:hover { background: #aaa; }
+            QSlider::handle:horizontal:hover { background: #4ad2d4; }
         """)
         self._volume_slider.valueChanged.connect(self._set_volume)
         
@@ -180,7 +183,7 @@ class TrackWidget(QWidget):
         vol_layout.setSpacing(5)
         
         vol_icon = QLabel()
-        vol_icon.setPixmap(qta.icon("fa5s.volume-up", color="gray").pixmap(12, 12))
+        vol_icon.setPixmap(qta.icon("fa5s.volume-up", color="#9aa3ad").pixmap(12, 12))
         vol_layout.addWidget(vol_icon)
         vol_layout.addWidget(self._volume_slider)
         

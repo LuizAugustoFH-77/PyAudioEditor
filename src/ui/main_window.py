@@ -8,16 +8,18 @@ import time
 from typing import Optional, Callable, Any
 
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QScrollBar, QScrollArea,
     QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox,
-    QInputDialog, QMessageBox, QProgressBar
+    QInputDialog, QMessageBox, QProgressBar, QFrame
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, QThread, pyqtSignal
-from PyQt6.QtGui import QAction, QKeySequence, QCloseEvent
+from PyQt6.QtGui import QAction, QKeySequence, QCloseEvent, QGuiApplication
 import qtawesome as qta
 
 from src.core.audio_engine import AudioEngine
+from src.core.types import SeparationResult
+from src.core import separation as separation_core
 from src.core import effects_basic as fx
 from src.core import effects_vocal as fx_vocal
 from .time_ruler import TimeRulerWidget
@@ -64,14 +66,14 @@ class ProgressDialog(QDialog):
     def __init__(self, title="Processing Audio", parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setFixedSize(400, 150)
+        self.setFixedSize(420, 170)
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint)
         
         layout = QVBoxLayout(self)
         
         self.status_label = QLabel("Initializing...")
-        self.status_label.setStyleSheet("font-weight: bold; margin-bottom: 5px;")
+        self.status_label.setStyleSheet("font-weight: 600; margin-bottom: 6px;")
         
         self.bar = QProgressBar()
         self.bar.setRange(0, 0) # Indeterminate by default
@@ -79,7 +81,7 @@ class ProgressDialog(QDialog):
         
         self.eta_label = QLabel("Estimating time...")
         self.eta_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.eta_label.setStyleSheet("color: #888;")
+        self.eta_label.setStyleSheet("color: #9aa3ad;")
         
         layout.addWidget(self.status_label)
         layout.addWidget(self.bar)
@@ -105,7 +107,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         
         self.setWindowTitle("PyAudacity - Audio Editor")
-        self.resize(1000, 700)
+        self._apply_initial_window_geometry()
         
         # Core Components
         self.audio_engine = AudioEngine()
@@ -117,7 +119,9 @@ class MainWindow(QMainWindow):
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.main_layout = QVBoxLayout(self.central_widget)
-        
+        self.main_layout.setContentsMargins(12, 10, 12, 10)
+        self.main_layout.setSpacing(6)
+
         self.create_toolbar()
         self.create_menus()
         self.create_track_view()
@@ -127,11 +131,44 @@ class MainWindow(QMainWindow):
         self.global_visible_start = 0
         self.global_visible_len = 0
         self.track_widgets = []
+
+        # Async task context (used to apply results safely on UI thread)
+        self._async_context: dict[str, Any] = {}
+
         
         # Update timer (GUI update 30fps)
         self.timer = QTimer()
         self.timer.timeout.connect(self.periodic_update)
         self.timer.start(30) # 30 ms interval
+
+    def _apply_initial_window_geometry(self) -> None:
+        """Set a 16:9 startup size that fits the current screen."""
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            self.resize(1280, 720)
+            return
+
+        available = screen.availableGeometry()
+        max_w = int(available.width() * 0.92)
+        max_h = int(available.height() * 0.92)
+        target_w = 1280
+        target_h = 720
+
+        if max_w >= target_w and max_h >= target_h:
+            width = target_w
+            height = target_h
+        else:
+            width = max_w
+            height = int(width * 9 / 16)
+            if height > max_h:
+                height = max_h
+                width = int(height * 16 / 9)
+
+        self.resize(width, height)
+        self.move(
+            available.x() + (available.width() - width) // 2,
+            available.y() + (available.height() - height) // 2,
+        )
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Ensure audio stream and worker threads stop before Qt teardown."""
@@ -158,6 +195,7 @@ class MainWindow(QMainWindow):
         # File & History Toolbar
         file_toolbar = self.addToolBar("File")
         file_toolbar.setMovable(False)
+        file_toolbar.setIconSize(QSize(18, 18))
         
         undo_action = QAction(qta.icon("fa5s.undo", color="white"), "Undo", self)
         undo_action.setShortcut(QKeySequence.StandardKey.Undo)
@@ -172,6 +210,7 @@ class MainWindow(QMainWindow):
         # Edit Toolbar
         edit_toolbar = self.addToolBar("Edit")
         edit_toolbar.setMovable(False)
+        edit_toolbar.setIconSize(QSize(18, 18))
         
         cut_action = QAction(qta.icon("fa5s.cut", color="white"), "Cut", self)
         cut_action.setShortcut(QKeySequence.StandardKey.Cut)
@@ -251,6 +290,9 @@ class MainWindow(QMainWindow):
             ("Nightcore", "nightcore"),
             ("Lo-Fi Style", "lofi"),
             ("Bass Boosted", "bass_boosted"),
+            ("Podcast Clean", "podcast_clean"),
+            ("Radio Voice", "radio_voice"),
+            ("Dreamy Space", "dreamy_space"),
         ]
         
         for label, name in presets_list:
@@ -264,9 +306,9 @@ class MainWindow(QMainWindow):
         miku_menu = presets_menu.addMenu("🎤 Miku Ver. (Vocaloid Style)")
         
         miku_presets = [
-            ("Miku Ver. (Standard)", "miku_ver", "Classic Hatsune Miku sound (+4 semitones)"),
+            ("Miku Ver. (Standard)", "miku_ver", "Miku-inspired tone (+4 semitones, smooth tuning)"),
             ("Miku Ver. Soft", "miku_ver_soft", "Softer, more natural variant (+3 semitones)"),
-            ("Miku Ver. Hard", "miku_ver_hard", "More robotic/synthetic (+5 semitones)"),
+            ("Miku Ver. Hard", "miku_ver_hard", "Brighter, more synthetic variant (+5 semitones)"),
         ]
         
         for label, name, tooltip in miku_presets:
@@ -291,9 +333,12 @@ class MainWindow(QMainWindow):
             "nightcore": (fx_vocal.apply_nightcore_preset, "Nightcore"),
             "lofi": (fx_vocal.apply_lofi_preset, "Lo-Fi"),
             "bass_boosted": (fx_vocal.apply_bass_boosted_preset, "Bass Boosted"),
-            "miku_ver": (lambda d, sr: fx_vocal.apply_miku_voice_chain(d, sr, 4.0, 1.12), "Miku Ver."),
-            "miku_ver_soft": (lambda d, sr: fx_vocal.apply_miku_voice_chain(d, sr, 3.0, 1.10), "Miku Ver. Soft"),
-            "miku_ver_hard": (lambda d, sr: fx_vocal.apply_miku_voice_chain(d, sr, 5.0, 1.15), "Miku Ver. Hard"),
+            "podcast_clean": (fx_vocal.apply_podcast_clean_preset, "Podcast Clean"),
+            "radio_voice": (fx_vocal.apply_radio_voice_preset, "Radio Voice"),
+            "dreamy_space": (fx_vocal.apply_dreamy_space_preset, "Dreamy Space"),
+            "miku_ver": (fx_vocal.apply_miku_voice_preset, "Miku Ver."),
+            "miku_ver_soft": (fx_vocal.apply_miku_voice_soft_preset, "Miku Ver. Soft"),
+            "miku_ver_hard": (fx_vocal.apply_miku_voice_hard_preset, "Miku Ver. Hard"),
         }
         
         if preset_name not in preset_map:
@@ -382,6 +427,30 @@ class MainWindow(QMainWindow):
             self.progress_dialog.close()
             
         if success:
+            # If this task returned a SeparationResult, apply it on the UI thread here.
+            if isinstance(result, SeparationResult):
+                if not result.success:
+                    msg = result.error or "Unknown separation error."
+                    self.statusBar().showMessage(msg, 6000)
+                    QMessageBox.warning(self, "Separation Failed", msg)
+                    return
+
+                base_name = self._async_context.get("base_track_name", "Track")
+                sr = int(self._async_context.get("samplerate", self.audio_engine.samplerate))
+
+                new_tracks = separation_core.create_tracks_from_separation(result, base_name, sr)
+                if not new_tracks:
+                    self.statusBar().showMessage("Separation returned no stems.", 6000)
+                    QMessageBox.warning(self, "Separation Failed", "Separation returned no stems.")
+                    return
+
+                for t in new_tracks:
+                    self.audio_engine.add_track(t)
+
+                self.statusBar().showMessage(f"Added {len(new_tracks)} separated stems", 4000)
+                self.refresh_track_list()
+                return
+
             if result is True:
                 self.statusBar().showMessage("Task completed successfully", 3000)
             elif isinstance(result, str):
@@ -400,8 +469,8 @@ class MainWindow(QMainWindow):
                         QMessageBox.warning(self, "Task Failed", result)
             elif result is False:
                 QMessageBox.warning(self, "Task Failed", "The operation returned a failure status.")
-            
-            # Use specific result handling if needed, or just refresh
+
+            # Default refresh
             self.refresh_track_list()
         else:
             QMessageBox.critical(self, "Error", f"An error occurred during background processing:\n{result}")
@@ -681,7 +750,7 @@ class MainWindow(QMainWindow):
         demucs_4stem_action.setToolTip("Separates into Vocals, Drums, Bass, Other")
         demucs_4stem_action.triggered.connect(lambda: self.apply_tool_to_track("demucs_4stem"))
         ai_menu.addAction(demucs_4stem_action)
-        
+
         spleeter_action = QAction("🎤 Separate Vocals (Spleeter)", self)
         spleeter_action.setToolTip("Alternative AI separation - requires spleeter")
         spleeter_action.triggered.connect(lambda: self.apply_tool_to_track("spleeter"))
@@ -734,7 +803,7 @@ class MainWindow(QMainWindow):
         # Define the task based on tool name
         task_func = None
         task_name = "Processing"
-        
+
         if tool_name == "hpss":
             task_func = lambda: self.audio_engine.separate_hpss(idx)
             task_name = "HPSS Separation"
@@ -742,10 +811,15 @@ class MainWindow(QMainWindow):
             task_func = lambda: self.audio_engine.separate_vocals_dsp(idx)
             task_name = "Karaoke DSP"
         elif tool_name == "demucs":
-            task_func = lambda: self.audio_engine.separate_ai_demucs(idx, two_stems=True)
+            # IMPORTANT: compute in worker, but apply (add tracks) on UI thread.
+            base = self.audio_engine.tracks[idx]
+            self._async_context = {"kind": "separation", "base_track_name": base.name, "samplerate": self.audio_engine.samplerate}
+            task_func = lambda: separation_core.separate_with_demucs(base.data, self.audio_engine.samplerate, True)
             task_name = "Demucs AI Separation"
         elif tool_name == "demucs_4stem":
-            task_func = lambda: self.audio_engine.separate_ai_demucs(idx, two_stems=False)
+            base = self.audio_engine.tracks[idx]
+            self._async_context = {"kind": "separation", "base_track_name": base.name, "samplerate": self.audio_engine.samplerate}
+            task_func = lambda: separation_core.separate_with_demucs(base.data, self.audio_engine.samplerate, False)
             task_name = "Demucs 4-Stem Separation"
         elif tool_name == "spleeter":
             task_func = lambda: self.audio_engine.separate_vocals_spleeter(idx, stems=2)
@@ -754,10 +828,14 @@ class MainWindow(QMainWindow):
             task_func = lambda: self.audio_engine.separate_vocals_spleeter(idx, stems=4)
             task_name = "Spleeter 4-Stem"
         elif tool_name == "auto":
-            task_func = lambda: self.audio_engine.separate_vocals_auto(idx, two_stems=True)
+            base = self.audio_engine.tracks[idx]
+            self._async_context = {"kind": "separation", "base_track_name": base.name, "samplerate": self.audio_engine.samplerate}
+            task_func = lambda: separation_core.separate_vocals_auto(base.data, self.audio_engine.samplerate, True)
             task_name = "Auto Separation"
         elif tool_name == "auto_4stem":
-            task_func = lambda: self.audio_engine.separate_vocals_auto(idx, two_stems=False)
+            base = self.audio_engine.tracks[idx]
+            self._async_context = {"kind": "separation", "base_track_name": base.name, "samplerate": self.audio_engine.samplerate}
+            task_func = lambda: separation_core.separate_vocals_auto(base.data, self.audio_engine.samplerate, False)
             task_name = "Auto 4-Stem Separation"
             
         if task_func:
@@ -770,8 +848,7 @@ class MainWindow(QMainWindow):
                 "Demucs AI separation requires additional packages.\n\n"
                 "To install, run in your terminal:\n"
                 "pip install torch torchaudio demucs\n\n"
-                "Note: This requires ~2GB download and works best with GPU.\n"
-                "For CPU-only: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu")
+                "Note: This requires ~2GB download.")
         elif tool_name == "spleeter":
             QMessageBox.warning(self, "Spleeter Not Available",
                 "Spleeter separation requires additional packages.\n\n"
@@ -797,7 +874,7 @@ class MainWindow(QMainWindow):
         variants = [
             "Miku Ver. (Standard) - +4 semitones", 
             "Miku Ver. Soft - +3 semitones (more natural)",
-            "Miku Ver. Hard - +5 semitones (more robotic)"
+            "Miku Ver. Hard - +5 semitones (brighter, synthetic)"
         ]
         variant, ok = QInputDialog.getItem(
             self, "Select Miku Style",
@@ -807,64 +884,79 @@ class MainWindow(QMainWindow):
         if not ok or not variant:
             return
         
-        # Map to parameters
+        # Map to preset
         if "Soft" in variant:
-            pitch, formant = 3.0, 1.10
+            preset_key = "soft"
+            variant_name = "Miku Ver. Soft"
         elif "Hard" in variant:
-            pitch, formant = 5.0, 1.15
+            preset_key = "hard"
+            variant_name = "Miku Ver. Hard"
         else:
-            pitch, formant = 4.0, 1.12
+            preset_key = "standard"
+            variant_name = "Miku Ver."
             
-        def workflow_task():
-            # Step 1: Separate
-            orig_count = len(self.audio_engine.tracks)
-            
-            result_sep = self.audio_engine.separate_vocals(idx, two_stems=True)
-            if result_sep is not True:
-                return result_sep or "Failed to separate vocals."
-                
-            # Find new vocal track
-            vocals_idx = -1
-            for i in range(orig_count, len(self.audio_engine.tracks)):
-                if "Vocals" in self.audio_engine.tracks[i].name:
-                    vocals_idx = i
-                    break
-            
-            if vocals_idx == -1:
-                return "Separation finished but could not find vocal track."
-                
-            # Step 2: Apply Miku preset
-            effect_func = lambda d, sr: fx_vocal.apply_miku_voice_chain(d, sr, pitch, formant)
-            success_preset = self.audio_engine.apply_effect(vocals_idx, effect_func, "Miku Ver.")
-            
-            if success_preset:
-                self.audio_engine.tracks[vocals_idx].name = f"{self.audio_engine.tracks[idx].name} (Miku Ver.)"
-                return True
-            else:
-                return "Failed to apply Miku preset."
+        base = self.audio_engine.tracks[idx]
+        base_data = base.data
+        base_name = base.name
+        base_sr = self.audio_engine.samplerate
 
-        self.run_async_task(workflow_task, "Running Miku Transformation (Separate + Effect)...")
+        def workflow_task():
+            if base_data is None:
+                return SeparationResult(success=False, error="Track not found or empty.")
+            result_sep = separation_core.separate_vocals_auto(
+                base_data,
+                base_sr,
+                True,
+            )
+            if not result_sep.success:
+                return result_sep
+
+            vocals_data = None
+            other_tracks = []
+            for stem_name, stem_data in result_sep.tracks:
+                if "vocals" in stem_name.lower():
+                    vocals_data = stem_data
+                else:
+                    other_tracks.append((stem_name, stem_data))
+
+            if vocals_data is None:
+                return SeparationResult(success=False, error="Could not find vocal stem.")
+
+            if preset_key == "soft":
+                processed_vocals = fx_vocal.apply_miku_voice_soft_preset(vocals_data, base_sr)
+            elif preset_key == "hard":
+                processed_vocals = fx_vocal.apply_miku_voice_hard_preset(vocals_data, base_sr)
+            else:
+                processed_vocals = fx_vocal.apply_miku_voice_preset(vocals_data, base_sr)
+            tracks = [(variant_name, processed_vocals)]
+            tracks.extend(other_tracks)
+            return SeparationResult(success=True, tracks=tracks)
+
+        self._async_context = {
+            "kind": "miku",
+            "base_track_name": base_name,
+            "samplerate": base_sr,
+        }
+        self.run_async_task(workflow_task, "Running Miku Transformation...")
 
     def show_miku_info(self):
         """Show information about Miku Ver. preset."""
-        QMessageBox.information(self, "About Miku Ver. (High-Fidelity)",
-            "🎤 Miku Ver. Standard (High-Fidelity Update)\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "This preset transforms human vocals into a faithful Hatsune Miku representation,\n"
-            "emulating the iconic digital character from the Vocaloid engine.\n\n"
-            "The new processing chain includes:\n"
-            "• Chromatic Pitch Quantization (Robotic hard-tune artifacts)\n"
-            "• Improved Pitch shifting (+4 semitones)\n"
-            "• V4x-Standard Formant shifting (Synthetic character)\n"
-            "• Digital Compression (Locked-in dynamic response)\n"
-            "• De-essing (Clean high-end control)\n"
-            "• High-Harmonic Vocoder Layer (The characteristic digital buzz)\n"
-            "• Multi-Voice Chorus (Widened synthetic texture)\n"
-            "• Miku-Curve Signature EQ (Sparkle and clarity focus)\n\n"
+        info = (
+            "Miku Ver. (Natural)\n"
+            "-------------------\n\n"
+            "This preset targets a lighter, more faithful Miku-like timbre,\n"
+            "avoiding harsh robotic artifacts.\n\n"
+            "Processing chain:\n"
+            "- Gentle pitch correction (smooth, not hard-tuned)\n"
+            "- Pitch shift and formant shaping\n"
+            "- Signature EQ + light compression\n"
+            "- De-essing and subtle chorus for width\n\n"
             "For best results:\n"
-            "1. USE CLEAN VOCALS ONLY. This is not for full tracks.\n"
-            "2. Use the 'Full Miku Transformation' to separate vocals first.\n"
-            "3. Ensure the vocal track has minimal background noise.")
+            "1. Use clean, isolated vocals.\n"
+            "2. Run 'Full Miku Transformation' to separate vocals first.\n"
+            "3. Keep background noise and reverb to a minimum."
+        )
+        QMessageBox.information(self, "About Miku Ver.", info)
 
     def undo(self):
         if self.audio_engine.undo():
@@ -878,22 +970,28 @@ class MainWindow(QMainWindow):
 
     def create_transport_controls(self):
         transport_widget = QWidget()
-        transport_widget.setStyleSheet("background-color: #222; border-top: 1px solid #444;")
+        transport_widget.setStyleSheet(
+            "background-color: #151922; border-top: 1px solid #252c3a;"
+        )
         transport_layout = QHBoxLayout(transport_widget)
-        transport_layout.setContentsMargins(20, 10, 20, 10)
+        transport_layout.setContentsMargins(18, 10, 18, 10)
         
         self.time_label = QLabel("00:00 / 00:00")
-        self.time_label.setStyleSheet("font-family: 'Consolas'; font-size: 20px; font-weight: bold; color: #00ffff; min-width: 180px;")
+        self.time_label.setStyleSheet(
+            "font-family: 'Cascadia Mono', 'Consolas'; "
+            "font-size: 18px; font-weight: 600; color: #9fe8e8; min-width: 180px;"
+        )
         
         # Style helper for transport buttons
         btn_style = """
             QPushButton {
-                background-color: transparent; 
-                border-radius: 20px; 
-                padding: 5px;
+                background-color: #1f2533; 
+                border: 1px solid #2c3444;
+                border-radius: 18px; 
+                padding: 6px;
             }
-            QPushButton:hover { background-color: #444; }
-            QPushButton:pressed { background-color: #555; }
+            QPushButton:hover { background-color: #283145; }
+            QPushButton:pressed { background-color: #1a202d; }
         """
         
         self.btn_stop = QPushButton()
@@ -933,11 +1031,12 @@ class MainWindow(QMainWindow):
         # Scroll Area for Tracks
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         
         self.tracks_container = QWidget()
         self.tracks_layout = QVBoxLayout()
-        self.tracks_layout.setSpacing(0)
-        self.tracks_layout.setContentsMargins(0,0,0,0)
+        self.tracks_layout.setSpacing(6)
+        self.tracks_layout.setContentsMargins(0, 6, 0, 6)
         self.tracks_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.tracks_container.setLayout(self.tracks_layout)
         
@@ -1001,8 +1100,10 @@ class MainWindow(QMainWindow):
 
     def periodic_update(self):
         """Updates UI elements (playhead, time label) at 30fps."""
+        if not self.audio_engine.is_playing:
+            return
+
         current_sample = self.audio_engine.current_frame
-        samplerate = self.audio_engine.samplerate
         
         # Update playheads
         self.time_ruler.set_playhead(current_sample)
@@ -1010,11 +1111,7 @@ class MainWindow(QMainWindow):
             tw.waveform.set_playhead(current_sample)
                 
         # Update Time Label
-        cur_sec = current_sample / samplerate if samplerate else 0
-        total_sec = self.audio_engine.get_duration()
-        
-        fmt = lambda s: f"{int(s // 60):02d}:{int(s % 60):02d}"
-        self.time_label.setText(f"{fmt(cur_sec)} / {fmt(total_sec)}")
+        self._update_time_label(current_sample)
 
     def on_track_view_changed(self):
         """Synchronizes all tracks when one is zoomed or scrolled."""
@@ -1198,8 +1295,20 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Export Error", f"Could not export file: {e}")
 
+    def _update_time_label(self, current_sample: int) -> None:
+        samplerate = self.audio_engine.samplerate
+        cur_sec = current_sample / samplerate if samplerate else 0
+        total_sec = self.audio_engine.get_duration()
+
+        fmt = lambda s: f"{int(s // 60):02d}:{int(s % 60):02d}"
+        self.time_label.setText(f"{fmt(cur_sec)} / {fmt(total_sec)}")
+
     def on_position_changed(self, seconds):
-        pass
+        current_sample = self.audio_engine.current_frame
+        self.time_ruler.set_playhead(current_sample)
+        for tw in self.track_widgets:
+            tw.waveform.set_playhead(current_sample)
+        self._update_time_label(current_sample)
 
     def on_state_changed(self, state):
         self.statusBar().showMessage(f"State: {state}", 2000)

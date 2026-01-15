@@ -8,7 +8,7 @@ from typing import Optional
 import numpy as np
 
 from PyQt6.QtWidgets import QWidget
-from PyQt6.QtCore import Qt, pyqtSignal, QPointF
+from PyQt6.QtCore import Qt, pyqtSignal, QPointF, QRect
 from PyQt6.QtGui import QPainter, QColor, QPen, QPalette, QPolygonF, QImage, QPixmap
 
 from src.core.config import WAVEFORM_CONFIG, SPECTROGRAM_CONFIG
@@ -47,8 +47,9 @@ class WaveformWidget(QWidget):
         # Colors from config
         self._color = QColor(*WAVEFORM_CONFIG.default_color)
         self._playhead_color = QColor(*WAVEFORM_CONFIG.playhead_color)
-        self._split_color = QColor(255, 255, 255, 150)
-        self._selection_color = QColor(255, 255, 255, WAVEFORM_CONFIG.selection_alpha)
+        self._split_color = QColor(255, 255, 255, 110)
+        self._selection_color = QColor(self._color)
+        self._selection_color.setAlpha(WAVEFORM_CONFIG.selection_alpha)
         
         # Spectrogram state
         self._show_spectrogram = False
@@ -69,6 +70,13 @@ class WaveformWidget(QWidget):
         # Performance: cached downsampled data
         self._cached_waveform: Optional[np.ndarray] = None
         self._cached_visible_range: tuple[int, int] = (0, 0)
+        self._cached_envelope: Optional[tuple[np.ndarray, np.ndarray]] = None
+        self._cached_envelope_view: tuple[int, int, int] = (0, 0, 0)
+
+        # Cached waveform pixmap for fast redraws
+        self._waveform_pixmap: Optional[QPixmap] = None
+        self._waveform_dirty: bool = True
+        self._last_playhead_x: Optional[int] = None
     
     # =========================================================================
     # PROPERTIES
@@ -108,8 +116,21 @@ class WaveformWidget(QWidget):
     
     def set_playhead(self, sample_index: int) -> None:
         """Update playhead position."""
-        if self._playhead_sample != sample_index:
-            self._playhead_sample = sample_index
+        if self._playhead_sample == sample_index:
+            return
+
+        self._playhead_sample = sample_index
+
+        if self._visible_len > 0 and self.rect().width() > 0:
+            ph_x = int(((sample_index - self._visible_start) / self._visible_len) * self.rect().width())
+            if self._last_playhead_x is not None:
+                x_min = min(self._last_playhead_x, ph_x) - 2
+                x_max = max(self._last_playhead_x, ph_x) + 2
+                self.update(QRect(x_min, 0, x_max - x_min + 1, self.rect().height()))
+            else:
+                self.update()
+            self._last_playhead_x = ph_x
+        else:
             self.update()
     
     def set_data(
@@ -127,6 +148,9 @@ class WaveformWidget(QWidget):
         self._spectrogram_pixmap = None
         self._spectrogram_dirty = True
         self._cached_waveform = None
+        self._cached_envelope = None
+        self._waveform_pixmap = None
+        self._waveform_dirty = True
         
         if data is not None and self._visible_len == 0:
             self._visible_start = 0
@@ -141,6 +165,8 @@ class WaveformWidget(QWidget):
             self._visible_start = start_sample
             self._visible_len = length_samples
             self._cached_waveform = None  # Invalidate cache
+            self._cached_envelope = None
+            self._waveform_dirty = True
             self.update()
             self.viewChanged.emit()
     
@@ -180,10 +206,10 @@ class WaveformWidget(QWidget):
     def paintEvent(self, event) -> None:
         """Main paint event - optimized rendering."""
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(20, 20, 20))
+        painter.fillRect(self.rect(), QColor(15, 18, 24))
         
         if self._audio_data is None:
-            painter.setPen(QColor(100, 100, 100))
+            painter.setPen(QColor(154, 163, 173))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No Audio Loaded")
             return
         
@@ -201,59 +227,86 @@ class WaveformWidget(QWidget):
         self._draw_splits(painter, height, width)
     
     def _draw_waveform(self, painter: QPainter, width: int, height: int) -> None:
-        """Optimized waveform rendering with downsampling."""
+        """Draw waveform from cached pixmap for fast repaints."""
+        pixmap = self._get_waveform_pixmap(width, height)
+        if pixmap is not None:
+            painter.drawPixmap(0, 0, pixmap)
+
+    def _get_waveform_pixmap(self, width: int, height: int) -> Optional[QPixmap]:
+        if self._audio_data is None or width <= 0 or height <= 0:
+            return None
+
+        if self._waveform_pixmap is None or self._waveform_dirty:
+            if (
+                self._waveform_pixmap is None
+                or self._waveform_pixmap.width() != width
+                or self._waveform_pixmap.height() != height
+            ):
+                self._waveform_pixmap = QPixmap(width, height)
+
+            self._waveform_pixmap.fill(Qt.GlobalColor.transparent)
+            pm_painter = QPainter(self._waveform_pixmap)
+            pm_painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            self._render_waveform(pm_painter, width, height)
+            pm_painter.end()
+            self._waveform_dirty = False
+
+        return self._waveform_pixmap
+
+    def _render_waveform(self, painter: QPainter, width: int, height: int) -> None:
+        """Render waveform into a cached pixmap."""
         channel_data = self._audio_data[:, 0] if self._audio_data.ndim > 1 else self._audio_data
         total_samples = len(channel_data)
-        
-        # Visible range
+
         v_start = self._visible_start
         v_len = self._visible_len
-        
+
         d_start = max(0, int(v_start))
         d_end = min(total_samples, int(v_start + v_len))
-        
+
         if d_end <= d_start:
             return
-        
+
         view_data = channel_data[d_start:d_end]
-        
-        # Adaptive downsampling based on view width
+
         step = max(1, int(v_len / width))
-        
-        # Use min/max envelope for better visualization at high zoom-out
+        mid_y = height / 2
+        painter.setPen(self._color)
+
         if step > 2:
-            # Calculate envelope (min/max per block)
-            n_blocks = len(view_data) // step
-            if n_blocks > 0:
-                reshaped = view_data[:n_blocks * step].reshape(n_blocks, step)
-                mins = reshaped.min(axis=1)
-                maxs = reshaped.max(axis=1)
-                
-                # Draw envelope
-                mid_y = height / 2
-                painter.setPen(self._color)
-                
-                for i in range(n_blocks):
-                    abs_sample = d_start + (i * step)
-                    x = ((abs_sample - v_start) / v_len) * width
-                    
-                    y_min = mid_y - (mins[i] * mid_y * 0.9)
-                    y_max = mid_y - (maxs[i] * mid_y * 0.9)
-                    
-                    painter.drawLine(int(x), int(y_min), int(x), int(y_max))
+            current_view = (d_start, d_end, step)
+            if self._cached_envelope_view == current_view and self._cached_envelope is not None:
+                mins, maxs = self._cached_envelope
+            else:
+                n_blocks = len(view_data) // step
+                if n_blocks > 0:
+                    try:
+                        reshaped = view_data[:n_blocks * step].reshape(n_blocks, step)
+                        mins = reshaped.min(axis=1)
+                        maxs = reshaped.max(axis=1)
+                        self._cached_envelope = (mins, maxs)
+                        self._cached_envelope_view = current_view
+                    except (ValueError, MemoryError):
+                        mins = view_data[::step]
+                        maxs = view_data[::step]
+                else:
+                    mins = view_data
+                    maxs = view_data
+
+            for i in range(len(mins)):
+                abs_sample = d_start + (i * step)
+                x = ((abs_sample - v_start) / v_len) * width
+                y_min = mid_y - (mins[i] * mid_y * 0.9)
+                y_max = mid_y - (maxs[i] * mid_y * 0.9)
+                painter.drawLine(int(x), int(y_min), int(x), int(y_max))
         else:
-            # Direct plotting for zoomed-in view
             plot_data = view_data[::step]
-            mid_y = height / 2
-            painter.setPen(self._color)
-            
             poly = QPolygonF()
             for i, val in enumerate(plot_data):
                 abs_sample = d_start + (i * step)
                 x = ((abs_sample - v_start) / v_len) * width
                 y = mid_y - (val * mid_y * 0.9)
                 poly.append(QPointF(x, y))
-            
             painter.drawPolyline(poly)
     
     def _draw_spectrogram(self, painter: QPainter, width: int, height: int) -> None:
@@ -295,15 +348,24 @@ class WaveformWidget(QWidget):
             import librosa
             
             y = self._audio_data[:, 0] if self._audio_data.ndim > 1 else self._audio_data
+
+            max_duration = SPECTROGRAM_CONFIG.max_duration_for_full_stft
+            if max_duration > 0:
+                max_samples = int(max_duration * self._sr)
+                if max_samples > 0 and len(y) > max_samples:
+                    stride = max(1, int(np.ceil(len(y) / max_samples)))
+                    y = y[::stride]
+
+            n_fft = SPECTROGRAM_CONFIG.n_fft
+            hop_length = SPECTROGRAM_CONFIG.hop_length
+            if max_duration > 0 and len(y) < SPECTROGRAM_CONFIG.n_fft:
+                n_fft = max(256, len(y) // 2)
+                hop_length = max(64, n_fft // 4)
             
             # STFT
             D = librosa.amplitude_to_db(
-                np.abs(librosa.stft(
-                    y,
-                    n_fft=SPECTROGRAM_CONFIG.n_fft,
-                    hop_length=SPECTROGRAM_CONFIG.hop_length
-                )),
-                ref=np.max
+                np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop_length)),
+                ref=np.max,
             )
             
             # Normalize to 0-255
@@ -409,6 +471,14 @@ class WaveformWidget(QWidget):
                 self._selection_end = None
             
             self.update()
+
+    def resizeEvent(self, event) -> None:
+        """Handle resize to refresh cached visuals."""
+        self._waveform_dirty = True
+        self._spectrogram_dirty = True
+        self._waveform_pixmap = None
+        self._last_playhead_x = None
+        super().resizeEvent(event)
     
     def wheelEvent(self, event) -> None:
         """Handle zoom via mouse wheel."""

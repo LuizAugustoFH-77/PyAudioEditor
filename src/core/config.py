@@ -36,9 +36,9 @@ class SpectrogramConfig:
 class WaveformConfig:
     """Waveform visualization settings."""
     min_visible_samples: int = 100
-    default_color: tuple[int, int, int] = (0, 255, 255)  # Cyan
-    playhead_color: tuple[int, int, int] = (255, 50, 50)  # Red
-    selection_alpha: int = 50
+    default_color: tuple[int, int, int] = (44, 199, 201)  # Teal
+    playhead_color: tuple[int, int, int] = (240, 79, 90)  # Warm red
+    selection_alpha: int = 80
     downsample_threshold: int = 10000  # Use downsampling above this
 
 
@@ -68,9 +68,6 @@ class EffectsConfig:
     compressor_attack_ms: float = 5.0
     compressor_release_ms: float = 100.0
     
-    # Miku/Vocaloid preset
-    miku_pitch_semitones: float = 4.0
-    miku_formant_ratio: float = 1.06
 
 
 # Global config instances (immutable singletons)

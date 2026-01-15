@@ -158,99 +158,94 @@ def apply_formant_shift(
     return result.astype(np.float32)
 
 
-def apply_pitch_quantization(
-    data: AudioArray, 
-    sr: int, 
-    strength: float = 1.0,
-    speed: float = 0.5
+def apply_pitch_correction(
+    data: AudioArray,
+    sr: int,
+    strength: float = 0.35,
+    speed: float = 0.65,
+    quantize: float = 0.25,
 ) -> AudioArray:
     """
-    Apply chromatic pitch quantization (Hard-Tune/Auto-Tune effect).
-    Essential for the "robotic" and "perfect" Vocaloid character.
-    
+    Apply gentle pitch correction without hard-robotic artifacts.
+
     Args:
         data: Audio samples
         sr: Sample rate
-        strength: How much to pull towards the nearest note (0.0 to 1.0)
-        speed: How fast the pitch snaps (0.0 = instant/robotic, 1.0 = natural)
-    
+        strength: Amount of correction (0.0 to 1.0)
+        speed: Smoothing (0.0 = slow/soft, 1.0 = fast/snappier)
+        quantize: Pull towards nearest semitone (0.0 to 1.0)
+
     Returns:
         Pitch-corrected audio data
     """
+    if strength <= 0.0:
+        return data
+
     try:
         import librosa
     except ImportError:
-        logger.warning("Librosa not available for pitch quantization, skipping...")
+        logger.warning("Librosa not available for pitch correction, skipping...")
         return data
 
-    # 1. Prepare Mono signal for pitch detection
     y_mono = np.mean(data, axis=1) if data.ndim > 1 else data
-    
-    # 2. Pitch Detection
+
     hop_length = 512
-    # Standard vocal range
-    fmin = librosa.note_to_hz('C2')
-    fmax = librosa.note_to_hz('C6')
-    
+    fmin = librosa.note_to_hz("C2")
+    fmax = librosa.note_to_hz("C6")
+
     try:
-        # Use YIN for faster processing
         f0 = librosa.yin(y_mono, fmin=fmin, fmax=fmax, sr=sr, hop_length=hop_length)
     except Exception as e:
         logger.error("Pitch detection failed: %s", e)
         return data
-    
-    # 3. Calculate target frequencies (Chromatic Scale)
-    # Filter out zeros/NaNs before conversion
+
     valid = (f0 > 0) & (~np.isnan(f0))
     if not np.any(valid):
         return data
-        
+
     midi = np.zeros_like(f0)
     midi[valid] = librosa.hz_to_midi(f0[valid])
-    
-    # Target is the nearest integer MIDI note
-    midi_target = np.round(midi)
-    
-    # Calculate shift in semitones
-    shift_signal = np.zeros_like(f0)
-    shift_signal[valid] = (midi_target[valid] - midi[valid]) * strength
-    
-    # 4. Smooth the shift signal if speed > 0 to avoid clicks
-    if speed > 0:
-        try:
-            from scipy.ndimage import gaussian_filter1d
-            sigma = max(1, int(speed * 8))
-            shift_signal = gaussian_filter1d(shift_signal, sigma=sigma)
-        except ImportError:
-            pass
 
-    # 5. Apply Time-Varying Pitch Shift
-    # We process in blocks to apply variable shifting
-    block_size = int(sr * 0.1)  # 100ms
-    hop_size = block_size // 2
+    target = midi.copy()
+    if quantize > 0.0:
+        target[valid] = midi[valid] + (np.round(midi[valid]) - midi[valid]) * quantize
+
+    try:
+        from scipy.ndimage import gaussian_filter1d
+
+        sigma = max(1, int((1.0 - speed) * 8))
+        target = gaussian_filter1d(target, sigma=sigma)
+    except Exception:
+        pass
+
+    shift_signal = (target - midi) * strength
+
+    block_size = int(sr * 0.1)
+    if block_size <= 0:
+        return data
+    if block_size > len(data):
+        block_size = len(data)
+    hop_size = max(1, block_size // 2)
     window = np.hanning(block_size)
-    
+
     output = np.zeros_like(data)
     norm_weights = np.zeros(len(data))
-    
-    # Progress logging for long vocal tracks
-    total_blocks = (len(data) - block_size) // hop_size
-    
+
+    total_blocks = max(1, (len(data) - block_size) // hop_size)
     for b in range(total_blocks):
         i = b * hop_size
-        
-        # Determine the average shift for this block center
+        if i + block_size > len(data):
+            break
+
         msg_idx = int((i + block_size // 2) / hop_length)
-        if msg_idx >= len(shift_signal): break
-        
+        if msg_idx >= len(shift_signal):
+            break
+
         n_steps = shift_signal[msg_idx]
-        
-        # Determine if we should shift
         if abs(n_steps) < 0.05:
             shifted_block = data[i : i + block_size]
         else:
             block = data[i : i + block_size]
-            # Use librosa for the block shift
             if block.ndim > 1:
                 shifted_block = np.zeros_like(block)
                 for ch in range(block.shape[1]):
@@ -258,26 +253,22 @@ def apply_pitch_quantization(
                         block[:, ch], sr=sr, n_steps=n_steps
                     )
             else:
-                shifted_block = librosa.effects.pitch_shift(
-                    block, sr=sr, n_steps=n_steps
-                )
-        
-        # Overlap-Add
+                shifted_block = librosa.effects.pitch_shift(block, sr=sr, n_steps=n_steps)
+
         if data.ndim > 1:
             win_2d = window[:, np.newaxis]
             output[i : i + block_size] += shifted_block * win_2d
         else:
             output[i : i + block_size] += shifted_block * window
-            
+
         norm_weights[i : i + block_size] += window
 
-    # Normalize
     norm_weights[norm_weights < 1e-6] = 1.0
     if data.ndim > 1:
         output /= norm_weights[:, np.newaxis]
     else:
         output /= norm_weights
-        
+
     return output.astype(np.float32)
 
 
@@ -593,86 +584,113 @@ def apply_vocoder(
 # VOCAL PRESETS
 # =============================================================================
 
-def apply_miku_voice_chain(
-    data: AudioArray, 
+def apply_miku_voice_preset(
+    data: AudioArray,
     sr: int,
     pitch_semitones: float = 4.0,
-    formant_ratio: float = 1.12
+    formant_ratio: float = 1.08,
+    tune_strength: float = 0.35,
+    tune_speed: float = 0.65,
+    tune_quantize: float = 0.25,
 ) -> AudioArray:
     """
-    Refined, high-fidelity Miku-style (Vocaloid) voice processing chain.
-    Transforms clean vocals into a faithful Hatsune Miku representation.
-    
+    Natural Miku-inspired vocal chain (less robotic, more faithful timbre).
+
     Args:
         data: Isolated vocal audio data
         sr: Sample rate
         pitch_semitones: Pitch shift amount (+3 to +5 typical)
-        formant_ratio: Formant shift (1.10-1.15 for classic V4x character)
-    
+        formant_ratio: Formant shift (1.04-1.12 typical)
+        tune_strength: Pitch correction amount (0.0 to 1.0)
+        tune_speed: Pitch correction smoothing (0.0 to 1.0)
+        tune_quantize: Pitch correction quantize amount (0.0 to 1.0)
+
     Returns:
-        Processed audio with iconic Vocaloid characteristics
+        Processed audio with Miku-inspired character
     """
-    logger.info("Applying Miku Ver. Standard chain (pitch=%f, formant=%f)", 
-                pitch_semitones, formant_ratio)
-    
-    # Step 1: High-pass to remove low-end rumble
-    processed = apply_highpass(data, sr, cutoff=150)
-    
-    # Step 2: Pitch Quantization (The "Hard-Tune" robotic artifact)
-    # Using low speed (0.1) for that classic digital transition sound
-    processed = apply_pitch_quantization(processed, sr, strength=0.9, speed=0.1)
-    
-    # Step 3: Pitch shifting (Main transformation)
+    logger.info(
+        "Applying Miku preset (pitch=%f, formant=%f, tune=%f)",
+        pitch_semitones,
+        formant_ratio,
+        tune_strength,
+    )
+
+    processed = apply_highpass(data, sr, cutoff=110)
+
+    processed = apply_pitch_correction(
+        processed,
+        sr,
+        strength=tune_strength,
+        speed=tune_speed,
+        quantize=tune_quantize,
+    )
+
     processed = apply_pitch_shift(processed, sr, semitones=pitch_semitones)
-    
-    # Step 4: Formant shifting (Synthetic character)
     processed = apply_formant_shift(processed, sr, shift_ratio=formant_ratio)
-    
-    # Step 5: "Miku Signature" EQ
-    # - Cut boxiness at 400Hz
-    # - Dip clarity-masking frequencies at 1000Hz
-    # - "Miku Sparkle" boost at 5000Hz
-    # - Ultra-high "Air" shelf at 12000Hz
-    processed = apply_peaking_eq(processed, sr, frequency=400, gain_db=-5.0, Q=1.2)
-    processed = apply_peaking_eq(processed, sr, frequency=1000, gain_db=-3.0, Q=1.0)
-    processed = apply_peaking_eq(processed, sr, frequency=5000, gain_db=5.0, Q=0.8)
-    processed = apply_high_shelf(processed, sr, cutoff=12000, gain_db=8.0, Q=0.7)
-    
-    # Step 6: Heavy digital compression (Vocaloids have extremely consistent levels)
+
+    processed = apply_peaking_eq(processed, sr, frequency=350, gain_db=-3.0, Q=1.1)
+    processed = apply_peaking_eq(processed, sr, frequency=2800, gain_db=2.5, Q=1.0)
+    processed = apply_high_shelf(processed, sr, cutoff=10000, gain_db=4.0, Q=0.7)
+
     processed = apply_compressor(
-        processed, sr,
-        threshold_db=-24.0,
-        ratio=8.0,
-        attack_ms=1.0,
-        release_ms=50.0,
-        makeup_db=5.0
+        processed,
+        sr,
+        threshold_db=-22.0,
+        ratio=2.8,
+        attack_ms=4.0,
+        release_ms=90.0,
+        makeup_db=2.0,
     )
-    
-    # Step 7: Subtle Vocoder Layer (Adds that characteristic digital "buzz")
-    # Using a 12% mix for texture without losing intelligibility
-    processed = apply_vocoder(processed, sr, carrier_type='saw', bands=24, mix=0.12)
-    
-    # Step 8: De-essing (Control harshness after heavy high-frequency processing)
-    processed = apply_deesser(
-        processed, sr,
-        frequency=6500,
-        threshold_db=-24.0,
-        reduction_db=8.0
-    )
-    
-    # Step 9: Multi-voice Chorus for synthetic width
-    processed = apply_chorus(
-        processed, sr,
-        rate=0.4,
-        depth_ms=3.0,
-        mix=0.2,
-        voices=3
-    )
-    
-    # Step 10: Final Limiting
-    processed = apply_soft_clip(processed, threshold=0.98)
-    
+
+    processed = apply_deesser(processed, sr, frequency=6500, threshold_db=-26.0, reduction_db=4.0)
+    processed = apply_chorus(processed, sr, rate=0.25, depth_ms=2.5, mix=0.12, voices=2)
+    processed = apply_soft_clip(processed, threshold=0.97)
+
     return processed
+
+
+def apply_miku_voice_soft_preset(data: AudioArray, sr: int) -> AudioArray:
+    """
+    Softer, more natural Miku-inspired preset.
+
+    Args:
+        data: Isolated vocal audio data
+        sr: Sample rate
+
+    Returns:
+        Processed audio
+    """
+    return apply_miku_voice_preset(
+        data,
+        sr,
+        pitch_semitones=3.0,
+        formant_ratio=1.05,
+        tune_strength=0.25,
+        tune_speed=0.75,
+        tune_quantize=0.15,
+    )
+
+
+def apply_miku_voice_hard_preset(data: AudioArray, sr: int) -> AudioArray:
+    """
+    Brighter, more synthetic Miku-inspired preset (still non-robotic).
+
+    Args:
+        data: Isolated vocal audio data
+        sr: Sample rate
+
+    Returns:
+        Processed audio
+    """
+    return apply_miku_voice_preset(
+        data,
+        sr,
+        pitch_semitones=5.0,
+        formant_ratio=1.12,
+        tune_strength=0.5,
+        tune_speed=0.55,
+        tune_quantize=0.35,
+    )
 
 
 
@@ -778,4 +796,84 @@ def apply_bass_boosted_preset(data: AudioArray, sr: int) -> AudioArray:
     # Limiter to prevent clipping
     processed = apply_soft_clip(processed, threshold=0.9)
     
+    return processed
+
+
+def apply_podcast_clean_preset(data: AudioArray, sr: int) -> AudioArray:
+    """
+    Apply 'Podcast Clean' preset (clarity, level control, reduced sibilance).
+
+    Args:
+        data: Audio samples
+        sr: Sample rate
+
+    Returns:
+        Processed audio with broadcast-style clarity
+    """
+    processed = apply_highpass(data, sr, cutoff=80)
+    processed = apply_peaking_eq(processed, sr, frequency=3200, gain_db=3.0, Q=1.0)
+    processed = apply_high_shelf(processed, sr, cutoff=9000, gain_db=2.0, Q=0.7)
+    processed = apply_compressor(
+        processed,
+        sr,
+        threshold_db=-22.0,
+        ratio=3.0,
+        attack_ms=5.0,
+        release_ms=120.0,
+        makeup_db=3.0,
+    )
+    processed = apply_deesser(processed, sr, frequency=6500, threshold_db=-24.0, reduction_db=5.0)
+    processed = apply_soft_clip(processed, threshold=0.95)
+    return processed
+
+
+def apply_radio_voice_preset(data: AudioArray, sr: int) -> AudioArray:
+    """
+    Apply 'Radio Voice' preset (band-limited, gritty broadcast tone).
+
+    Args:
+        data: Audio samples
+        sr: Sample rate
+
+    Returns:
+        Processed audio with classic radio/telephone character
+    """
+    from .effects_basic import apply_bandpass, apply_bitcrush
+
+    processed = apply_bandpass(data, sr, low_cutoff=300.0, high_cutoff=3400.0, order=2)
+    processed = apply_peaking_eq(processed, sr, frequency=1200, gain_db=2.5, Q=1.0)
+    processed = apply_compressor(
+        processed,
+        sr,
+        threshold_db=-26.0,
+        ratio=4.0,
+        attack_ms=4.0,
+        release_ms=120.0,
+        makeup_db=4.0,
+    )
+    processed = apply_bitcrush(processed, bits=12, downsample=2, mix=0.12)
+    processed = apply_soft_clip(processed, threshold=0.9)
+    return processed
+
+
+def apply_dreamy_space_preset(data: AudioArray, sr: int) -> AudioArray:
+    """
+    Apply 'Dreamy Space' preset (lush, spacious, slightly washed).
+
+    Args:
+        data: Audio samples
+        sr: Sample rate
+
+    Returns:
+        Processed audio with airy ambience
+    """
+    from .effects_basic import apply_delay, apply_lowpass, apply_low_shelf, apply_reverb
+
+    processed = apply_lowpass(data, sr, cutoff=12000)
+    processed = apply_chorus(processed, sr, rate=0.35, depth_ms=4.0, mix=0.25, voices=3)
+    processed = apply_delay(processed, sr, delay_ms=180.0, decay=0.25, feedback=True)
+    processed = apply_reverb(processed, sr, room_size=0.75, damping=0.45)
+    processed = apply_low_shelf(processed, sr, cutoff=200, gain_db=2.0)
+    processed = apply_high_shelf(processed, sr, cutoff=9000, gain_db=1.5)
+    processed = apply_soft_clip(processed, threshold=0.92)
     return processed

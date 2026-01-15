@@ -18,6 +18,12 @@ qtawesome>=1.2.0
 # demucs>=4.0.0
 # spleeter>=2.3.0
 
+# Optional: DirectML support for AMD/Intel GPUs on Windows
+# torch-directml>=0.2.0
+
+# Optional: ONNX Runtime DirectML (recommended for AMD GPU separation)
+# onnxruntime-directml>=1.17.0
+
 # Optional: High-quality pitch shifting
 # pyrubberband>=0.3.0
 
