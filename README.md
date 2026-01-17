@@ -22,10 +22,8 @@ A modern, high-performance Digital Audio Workstation (DAW) built with Python, Py
   - **Nightcore**: Speed up with pitch shift.
   - **Lo-Fi Style**: Warm, filtered sound.
   - **Bass Boosted**: Robust low-end enhancement with soft saturation.
-  - **🎤 Miku Ver.**: Transform vocals to sound like Hatsune Miku (Vocaloid style).
 - **AI-Powered Vocal Separation**:
-  - **Demucs AI**: State-of-the-art source separation (requires `torch` + `demucs`)
-  - **Spleeter**: Alternative AI separation (requires `spleeter`)
+  - **Demucs AI**: State-of-the-art source separation (CPU only; requires `torch` + `demucs`)
   - **HPSS**: Fast Harmonic/Percussive separation via librosa
   - **DSP Karaoke**: Center-channel cancellation fallback
 - **Robust File Support**: Load MP3, WAV, FLAC, OGG, and more via `librosa`.
@@ -60,23 +58,10 @@ A modern, high-performance Digital Audio Workstation (DAW) built with Python, Py
 
 ### Optional: AI Vocal Separation
 
-For best-quality AI vocal separation using **Demucs**:
+For best-quality AI vocal separation using **Demucs (CPU only)**:
 
 ```bash
-# CPU only
 pip install torch torchaudio demucs
-
-# With NVIDIA GPU (CUDA)
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-pip install demucs
-
-# With AMD GPU (DirectML on Windows)
-pip install torch-directml demucs
-```
-
-Alternative with **Spleeter**:
-```bash
-pip install spleeter
 ```
 
 ### Running the App
@@ -100,7 +85,7 @@ pytest --cov=src --cov-report=html
 - **GUI**: [PyQt6](https://www.riverbankcomputing.com/software/pyqt/)
 - **Audio Engine**: [SoundDevice](https://python-sounddevice.readthedocs.io/)
 - **DSP & I/O**: [Librosa](https://librosa.org/), [NumPy](https://numpy.org/), [SciPy](https://scipy.org/)
-- **AI Separation**: [Demucs](https://github.com/facebookresearch/demucs), [Spleeter](https://github.com/deezer/spleeter)
+- **AI Separation**: [Demucs](https://github.com/facebookresearch/demucs)
 - **Icons**: [QtAwesome](https://github.com/spyder-ide/qtawesome)
 - **Theming**: [qdarktheme](https://github.com/5yutan5/PyQtDarkTheme)
 

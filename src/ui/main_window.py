@@ -248,8 +248,8 @@ class MainWindow(QMainWindow):
                 "html": (
                     "<h2>AI and Separation</h2>"
                     "<ul>"
-                    "<li>Tools menu provides DSP and AI options for separation.</li>"
-                    "<li>Choose CPU/GPU backends when available for faster processing.</li>"
+                    "<li>Tools menu provides DSP options plus Demucs AI separation.</li>"
+                    "<li>Demucs runs on CPU and may take several minutes on large files.</li>"
                     "</ul>"
                 ),
             },
@@ -459,23 +459,6 @@ class MainWindow(QMainWindow):
             action = QAction(label, self)
             action.triggered.connect(lambda checked, n=name: self.apply_preset_dialog(n))
             presets_menu.addAction(action)
-        
-        presets_menu.addSeparator()
-        
-        # Miku Ver. Presets
-        miku_menu = presets_menu.addMenu("🎤 Miku Ver. (Vocaloid Style)")
-        
-        miku_presets = [
-            ("Miku Ver. (Standard)", "miku_ver", "Miku-inspired tone (+4 semitones, smooth tuning)"),
-            ("Miku Ver. Soft", "miku_ver_soft", "Softer, more natural variant (+3 semitones)"),
-            ("Miku Ver. Hard", "miku_ver_hard", "Brighter, more synthetic variant (+5 semitones)"),
-        ]
-        
-        for label, name, tooltip in miku_presets:
-            action = QAction(label, self)
-            action.setToolTip(tooltip)
-            action.triggered.connect(lambda checked, n=name: self.apply_preset_dialog(n))
-            miku_menu.addAction(action)
 
     def apply_preset_dialog(self, preset_name: str) -> None:
         """Apply a preset effect to a selected track."""
@@ -496,9 +479,6 @@ class MainWindow(QMainWindow):
             "podcast_clean": (fx_vocal.apply_podcast_clean_preset, "Podcast Clean"),
             "radio_voice": (fx_vocal.apply_radio_voice_preset, "Radio Voice"),
             "dreamy_space": (fx_vocal.apply_dreamy_space_preset, "Dreamy Space"),
-            "miku_ver": (fx_vocal.apply_miku_voice_preset, "Miku Ver."),
-            "miku_ver_soft": (fx_vocal.apply_miku_voice_soft_preset, "Miku Ver. Soft"),
-            "miku_ver_hard": (fx_vocal.apply_miku_voice_hard_preset, "Miku Ver. Hard"),
         }
         
         if preset_name not in preset_map:
@@ -507,18 +487,10 @@ class MainWindow(QMainWindow):
         
         effect_func, display_name = preset_map[preset_name]
 
-        # For heavy Miku preset, use background worker
-        if "miku" in preset_name:
-            def apply_preset_task():
-                return self.audio_engine.apply_effect(idx, effect_func, display_name)
-            
-            self.run_async_task(apply_preset_task, f"Applying {display_name}...")
+        if self.audio_engine.apply_effect(idx, effect_func, display_name):
+            self.statusBar().showMessage(f"Applied {display_name} to track {idx+1}", 3000)
         else:
-            # Simple presets run on main thread
-            if self.audio_engine.apply_effect(idx, effect_func, display_name):
-                self.statusBar().showMessage(f"Applied {display_name} to track {idx+1}", 3000)
-            else:
-                self.statusBar().showMessage(f"Failed to apply {display_name}", 3000)
+            self.statusBar().showMessage(f"Failed to apply {display_name}", 3000)
 
     def select_track_dialog(self, title, label):
         """Unified track selection dialog."""
@@ -542,7 +514,7 @@ class MainWindow(QMainWindow):
         self.progress_dialog = ProgressDialog(title, self)
         
         # Add a note for AI tasks
-        if "Separation" in title or "Demucs" in title or "Spleeter" in title:
+        if "Demucs" in title:
             ai_note = QLabel("AI processing is intensive and may take several minutes.")
             ai_note.setStyleSheet("color: #aaa; font-style: italic; font-size: 11px;")
             self.progress_dialog.layout().insertWidget(1, ai_note)
@@ -569,7 +541,7 @@ class MainWindow(QMainWindow):
             if self.fake_progress_val < 90:
                 # Use a slower increment for AI tasks
                 title = self.progress_dialog.windowTitle()
-                is_ai = any(kw in title for kw in ["Separation", "Demucs", "Spleeter", "Miku"])
+                is_ai = "Demucs" in title
                 
                 step = 0.5 if is_ai else 1.0
                 self.fake_progress_val += (step + (90 - self.fake_progress_val) * 0.02)
@@ -646,8 +618,6 @@ class MainWindow(QMainWindow):
                 if "pip install" in lower_res or "not installed" in lower_res or "not available" in lower_res:
                     if "demucs" in lower_res:
                         self.show_ai_install_help("demucs")
-                    elif "spleeter" in lower_res:
-                        self.show_ai_install_help("spleeter")
                     else:
                         QMessageBox.warning(self, "AI Tool Missing", result)
                 else:
@@ -716,7 +686,7 @@ class MainWindow(QMainWindow):
             params["semitones"] = sb
             
             # Add info label
-            info = QLabel("Positive = higher pitch, Negative = lower pitch\nMiku-style: +3 to +5 semitones")
+            info = QLabel("Positive = higher pitch, Negative = lower pitch")
             info.setStyleSheet("color: #888; font-size: 10px;")
             layout.addRow(info)
         elif effect_name == "compressor":
@@ -919,8 +889,8 @@ class MainWindow(QMainWindow):
         
         tools_menu.addSeparator()
         
-        # AI Separation Submenu
-        ai_menu = tools_menu.addMenu("🎵 AI & Vocal Separation")
+        # Vocal Separation Submenu
+        ai_menu = tools_menu.addMenu("🎵 Vocal Separation")
         
         # Quick DSP methods
         hpss_action = QAction("Separate Harmonic/Percussive (Fast)", self)
@@ -934,53 +904,19 @@ class MainWindow(QMainWindow):
         ai_menu.addAction(karaoke_action)
         
         ai_menu.addSeparator()
-        ai_menu.addAction(QAction("─── AI Methods (Higher Quality) ───", self))
+        ai_menu.addAction(QAction("─── Demucs (AI, CPU) ───", self))
         
-        # AI methods
+        # Demucs (AI, CPU)
         demucs_action = QAction("🤖 Separate Vocals (Demucs AI)", self)
-        demucs_action.setToolTip("State-of-the-art AI separation - requires torch & demucs")
+        demucs_action.setToolTip("State-of-the-art AI separation (CPU only) - requires torch & demucs")
         demucs_action.triggered.connect(lambda: self.apply_tool_to_track("demucs"))
         ai_menu.addAction(demucs_action)
         
         demucs_4stem_action = QAction("🤖 Separate 4 Stems (Demucs AI)", self)
-        demucs_4stem_action.setToolTip("Separates into Vocals, Drums, Bass, Other")
+        demucs_4stem_action.setToolTip("Separates into Vocals, Drums, Bass, Other (CPU only)")
         demucs_4stem_action.triggered.connect(lambda: self.apply_tool_to_track("demucs_4stem"))
         ai_menu.addAction(demucs_4stem_action)
 
-        spleeter_action = QAction("🎤 Separate Vocals (Spleeter)", self)
-        spleeter_action.setToolTip("Alternative AI separation - requires spleeter")
-        spleeter_action.triggered.connect(lambda: self.apply_tool_to_track("spleeter"))
-        ai_menu.addAction(spleeter_action)
-        
-        spleeter_4stem_action = QAction("🎤 Separate 4 Stems (Spleeter)", self)
-        spleeter_4stem_action.setToolTip("Spleeter 4-stem separation (vocals, drums, bass, other)")
-        spleeter_4stem_action.triggered.connect(lambda: self.apply_tool_to_track("spleeter_4stem"))
-        ai_menu.addAction(spleeter_4stem_action)
-        
-        ai_menu.addSeparator()
-        
-        auto_action = QAction("✨ Auto-Separate Vocals", self)
-        auto_action.setToolTip("Automatically uses the best available method")
-        auto_action.triggered.connect(lambda: self.apply_tool_to_track("auto"))
-        ai_menu.addAction(auto_action)
-
-        auto_4stem_action = QAction("✨ Auto-Separate 4 Stems", self)
-        auto_4stem_action.setToolTip("Best available 4-stem separation")
-        auto_4stem_action.triggered.connect(lambda: self.apply_tool_to_track("auto_4stem"))
-        ai_menu.addAction(auto_4stem_action)
-        
-        # Miku workflow helper
-        tools_menu.addSeparator()
-        miku_workflow = tools_menu.addMenu("🎤 Miku Ver. Workflow")
-        
-        miku_full_action = QAction("Full Miku Transformation (Separate + Apply)", self)
-        miku_full_action.setToolTip("Separates vocals and applies Miku Ver. preset automatically")
-        miku_full_action.triggered.connect(self.miku_full_workflow)
-        miku_workflow.addAction(miku_full_action)
-        
-        miku_info_action = QAction("ℹ️ About Miku Ver...", self)
-        miku_info_action.triggered.connect(self.show_miku_info)
-        miku_workflow.addAction(miku_info_action)
 
     def toggle_all_spectrograms(self, checked):
         for tw in self.track_widgets:
@@ -1017,22 +953,6 @@ class MainWindow(QMainWindow):
             self._async_context = {"kind": "separation", "base_track_name": base.name, "samplerate": self.audio_engine.samplerate}
             task_func = lambda: separation_core.separate_with_demucs(base.data, self.audio_engine.samplerate, False)
             task_name = "Demucs 4-Stem Separation"
-        elif tool_name == "spleeter":
-            task_func = lambda: self.audio_engine.separate_vocals_spleeter(idx, stems=2)
-            task_name = "Spleeter AI"
-        elif tool_name == "spleeter_4stem":
-            task_func = lambda: self.audio_engine.separate_vocals_spleeter(idx, stems=4)
-            task_name = "Spleeter 4-Stem"
-        elif tool_name == "auto":
-            base = self.audio_engine.tracks[idx]
-            self._async_context = {"kind": "separation", "base_track_name": base.name, "samplerate": self.audio_engine.samplerate}
-            task_func = lambda: separation_core.separate_vocals_auto(base.data, self.audio_engine.samplerate, True)
-            task_name = "Auto Separation"
-        elif tool_name == "auto_4stem":
-            base = self.audio_engine.tracks[idx]
-            self._async_context = {"kind": "separation", "base_track_name": base.name, "samplerate": self.audio_engine.samplerate}
-            task_func = lambda: separation_core.separate_vocals_auto(base.data, self.audio_engine.samplerate, False)
-            task_name = "Auto 4-Stem Separation"
             
         if task_func:
             self.run_async_task(task_func, f"Running {task_name}...")
@@ -1045,114 +965,10 @@ class MainWindow(QMainWindow):
                 "To install, run in your terminal:\n"
                 "pip install torch torchaudio demucs\n\n"
                 "Note: This requires ~2GB download.")
-        elif tool_name == "spleeter":
-            QMessageBox.warning(self, "Spleeter Not Available",
-                "Spleeter separation requires additional packages.\n\n"
-                "To install, run in your terminal:\n"
-                "pip install spleeter\n\n"
-                "Note: First run will download models (~300MB).")
         else:
             QMessageBox.warning(self, "Tool Failed",
                 f"The tool '{tool_name}' failed to execute.\n"
                 "Check the console for error details.")
-
-    def miku_full_workflow(self) -> None:
-        """Full workflow: separate vocals + apply Miku Ver. preset."""
-        if not self.audio_engine.tracks:
-            self.statusBar().showMessage("No tracks available", 3000)
-            return
-        
-        idx = self.select_track_dialog("Miku Ver. Full Workflow", "Select track to transform:")
-        if idx is None:
-            return
-        
-        # Ask for Miku variant
-        variants = [
-            "Miku Ver. (Standard) - +4 semitones", 
-            "Miku Ver. Soft - +3 semitones (more natural)",
-            "Miku Ver. Hard - +5 semitones (brighter, synthetic)"
-        ]
-        variant, ok = QInputDialog.getItem(
-            self, "Select Miku Style",
-            "Choose the Miku variant:", variants, 0, False
-        )
-        
-        if not ok or not variant:
-            return
-        
-        # Map to preset
-        if "Soft" in variant:
-            preset_key = "soft"
-            variant_name = "Miku Ver. Soft"
-        elif "Hard" in variant:
-            preset_key = "hard"
-            variant_name = "Miku Ver. Hard"
-        else:
-            preset_key = "standard"
-            variant_name = "Miku Ver."
-            
-        base = self.audio_engine.tracks[idx]
-        base_data = base.data
-        base_name = base.name
-        base_sr = self.audio_engine.samplerate
-
-        def workflow_task():
-            if base_data is None:
-                return SeparationResult(success=False, error="Track not found or empty.")
-            result_sep = separation_core.separate_vocals_auto(
-                base_data,
-                base_sr,
-                True,
-            )
-            if not result_sep.success:
-                return result_sep
-
-            vocals_data = None
-            other_tracks = []
-            for stem_name, stem_data in result_sep.tracks:
-                if "vocals" in stem_name.lower():
-                    vocals_data = stem_data
-                else:
-                    other_tracks.append((stem_name, stem_data))
-
-            if vocals_data is None:
-                return SeparationResult(success=False, error="Could not find vocal stem.")
-
-            if preset_key == "soft":
-                processed_vocals = fx_vocal.apply_miku_voice_soft_preset(vocals_data, base_sr)
-            elif preset_key == "hard":
-                processed_vocals = fx_vocal.apply_miku_voice_hard_preset(vocals_data, base_sr)
-            else:
-                processed_vocals = fx_vocal.apply_miku_voice_preset(vocals_data, base_sr)
-            tracks = [(variant_name, processed_vocals)]
-            tracks.extend(other_tracks)
-            return SeparationResult(success=True, tracks=tracks)
-
-        self._async_context = {
-            "kind": "miku",
-            "base_track_name": base_name,
-            "samplerate": base_sr,
-        }
-        self.run_async_task(workflow_task, "Running Miku Transformation...")
-
-    def show_miku_info(self):
-        """Show information about Miku Ver. preset."""
-        info = (
-            "Miku Ver. (Natural)\n"
-            "-------------------\n\n"
-            "This preset targets a lighter, more faithful Miku-like timbre,\n"
-            "avoiding harsh robotic artifacts.\n\n"
-            "Processing chain:\n"
-            "- Gentle pitch correction (smooth, not hard-tuned)\n"
-            "- Pitch shift and formant shaping\n"
-            "- Signature EQ + light compression\n"
-            "- De-essing and subtle chorus for width\n\n"
-            "For best results:\n"
-            "1. Use clean, isolated vocals.\n"
-            "2. Run 'Full Miku Transformation' to separate vocals first.\n"
-            "3. Keep background noise and reverb to a minimum."
-        )
-        QMessageBox.information(self, "About Miku Ver.", info)
 
     def undo(self):
         if self.audio_engine.undo():

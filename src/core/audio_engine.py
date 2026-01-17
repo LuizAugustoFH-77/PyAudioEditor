@@ -531,7 +531,7 @@ class AudioEngine(QObject):
     
     def separate_vocals(self, track_index: int, two_stems: bool = True) -> bool | str:
         """
-        Separate vocals from a track using the best available backend.
+        Separate vocals from a track using Demucs (CPU) with DSP fallback.
         
         Args:
             track_index: Index of track to separate
@@ -580,30 +580,9 @@ class AudioEngine(QObject):
         
         return True
     
-    def separate_with_spleeter(self, track_index: int, stems: int = 2) -> bool | str:
-        """Separate using Spleeter specifically."""
-        track = self.project.get_track(track_index)
-        if track is None or track.data is None:
-            return "Track not found or empty."
-        
-        result = separation.separate_with_spleeter(track.data, self.samplerate, stems)
-        
-        if not result.success:
-            logger.error("Spleeter separation failed: %s", result.error)
-            return result.error or "Unknown Spleeter error."
-        
-        new_tracks = separation.create_tracks_from_separation(result, track.name, self.samplerate)
-        for new_track in new_tracks:
-            self.add_track(new_track)
-        
-        return True
-    
     # Legacy method aliases for backward compatibility
     def separate_ai_demucs(self, track_index: int, two_stems: bool = True) -> bool | str:
         return self.separate_with_demucs(track_index, two_stems)
-    
-    def separate_vocals_spleeter(self, track_index: int, stems: int = 2) -> bool | str:
-        return self.separate_with_spleeter(track_index, stems)
     
     def separate_vocals_auto(self, track_index: int, two_stems: bool = True) -> bool | str:
         return self.separate_vocals(track_index, two_stems)

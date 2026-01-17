@@ -12,17 +12,10 @@ pyqtdarktheme>=2.1.0; python_version<'3.12'
 pyqtdarktheme>=0.1.7; python_version>='3.12'
 qtawesome>=1.2.0
 
-# Optional: AI vocal separation (uncomment to install)
+# Optional: AI vocal separation (Demucs, CPU only)
 # torch>=2.0.0
 # torchaudio>=2.0.0
 # demucs>=4.0.0
-# spleeter>=2.3.0
-
-# Optional: DirectML support for AMD/Intel GPUs on Windows
-# torch-directml>=0.2.0
-
-# Optional: ONNX Runtime DirectML (recommended for AMD GPU separation)
-# onnxruntime-directml>=1.17.0
 
 # Optional: High-quality pitch shifting
 # pyrubberband>=0.3.0

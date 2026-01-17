@@ -1,11 +1,9 @@
 """
 AI-powered vocal separation backends for PyAudioEditor.
-Supports Demucs, Spleeter, and DSP-based fallback (CPU only).
+Supports Demucs and DSP-based fallback (CPU only).
 """
 from __future__ import annotations
 import logging
-import os
-import tempfile
 import threading
 import numpy as np
 
@@ -23,10 +21,6 @@ _demucs_separator = None
 _demucs_separator_lock = threading.Lock()
 _demucs_model = None
 _demucs_model_lock = threading.Lock()
-_hdemucs_model = None
-_hdemucs_lock = threading.Lock()
-_spleeter_separators: dict[int, object] = {}
-_spleeter_lock = threading.Lock()
 
 
 # =============================================================================
@@ -51,21 +45,10 @@ def is_demucs_available() -> bool:
         return False
 
 
-def is_spleeter_available() -> bool:
-    """Check if Spleeter is available."""
-    try:
-        import spleeter
-        return True
-    except ImportError:
-        return False
-
-
 def get_best_backend() -> str:
     """Get the best available separation backend."""
     if is_demucs_available():
         return "demucs"
-    if is_spleeter_available():
-        return "spleeter"
     return "dsp"
 
 
@@ -100,37 +83,6 @@ def _get_demucs_model(model_name: str):
             model.eval()
             _demucs_model = model
     return _demucs_model
-
-
-def _get_hdemucs_model():
-    """Cache torchaudio HDemucs model."""
-    global _hdemucs_model
-    if _hdemucs_model is not None:
-        return _hdemucs_model
-    with _hdemucs_lock:
-        if _hdemucs_model is None:
-            import torch
-            from torchaudio.pipelines import HDEMUCS_HIGH_MUSDB_PLUS
-            bundle = HDEMUCS_HIGH_MUSDB_PLUS
-            model = bundle.get_model()
-            model.to(torch.device("cpu"))
-            model.eval()
-            _hdemucs_model = model
-    return _hdemucs_model
-
-
-def _get_spleeter_separator(stems: int):
-    """Cache Spleeter separator per stem count."""
-    cached = _spleeter_separators.get(stems)
-    if cached is not None:
-        return cached
-    with _spleeter_lock:
-        cached = _spleeter_separators.get(stems)
-        if cached is None:
-            from spleeter.separator import Separator
-            cached = Separator(f"spleeter:{stems}stems")
-            _spleeter_separators[stems] = cached
-    return cached
 
 
 # =============================================================================
@@ -280,206 +232,6 @@ def separate_with_demucs(
         return SeparationResult(success=False, error=error_msg)
 
 
-
-def separate_with_torchaudio_hdemucs(
-    data: AudioArray,
-    samplerate: int,
-    two_stems: bool = True
-) -> SeparationResult:
-    """
-    Alternative Demucs separation using torchaudio's built-in HDemucs model.
-    More stable API, included with torchaudio.
-    
-    Args:
-        data: Audio samples
-        samplerate: Sample rate
-        two_stems: If True, return vocals + instrumental. If False, return all stems.
-    
-    Returns:
-        SeparationResult with success status and extracted tracks
-    """
-    try:
-        if data is None or len(data) == 0:
-            return SeparationResult(success=False, error="No audio data provided.")
-
-        import torch
-        import torchaudio
-        from torchaudio.pipelines import HDEMUCS_HIGH_MUSDB_PLUS
-        
-        logger.info("Starting torchaudio HDemucs separation on CPU...")
-        
-        # Ensure stereo
-        if data.ndim == 1:
-            audio_stereo = np.column_stack((data, data))
-        else:
-            audio_stereo = data
-        
-        # (channels, samples)
-        waveform = torch.from_numpy(audio_stereo.T.astype(np.float32))
-        
-        # Get cached model
-        bundle = HDEMUCS_HIGH_MUSDB_PLUS
-        model = _get_hdemucs_model()
-        
-        # Resample if needed
-        model_sample_rate = bundle.sample_rate
-        if samplerate != model_sample_rate:
-            resampler = torchaudio.transforms.Resample(samplerate, model_sample_rate)
-            waveform = resampler(waveform)
-        
-        # Add batch dimension
-        waveform = waveform.unsqueeze(0)  # (1, channels, samples)
-        
-        # Run model
-        with torch.inference_mode():
-            sources = model(waveform)  # (1, 4, channels, samples)
-        
-        sources = sources.squeeze(0).cpu().numpy()  # (4, channels, samples)
-        
-        # Resample back if needed
-        if samplerate != model_sample_rate:
-            from scipy.signal import resample
-            original_len = len(data)
-            new_sources = []
-            for src in sources:
-                resampled = np.zeros((2, original_len), dtype=np.float32)
-                for ch in range(2):
-                    resampled[ch] = resample(src[ch], original_len)
-                new_sources.append(resampled)
-            sources = np.array(new_sources)
-        
-        # Order: drums, bass, other, vocals
-        stem_names = ['Drums', 'Bass', 'Other', 'Vocals']
-        tracks: list[tuple[str, AudioArray]] = []
-        
-        if two_stems:
-            vocals = sources[3].T  # (samples, channels)
-            instrumental = (sources[0] + sources[1] + sources[2]).T
-            tracks = [
-                ("Vocals", vocals.astype(np.float32)),
-                ("Instrumental", instrumental.astype(np.float32))
-            ]
-        else:
-            for i, name in enumerate(stem_names):
-                stem_data = sources[i].T
-                tracks.append((name, stem_data.astype(np.float32)))
-        
-        logger.info("torchaudio HDemucs separation completed successfully")
-        return SeparationResult(success=True, tracks=tracks)
-        
-    except ImportError as e:
-        logger.warning("torchaudio HDemucs not available: %s", e)
-        return SeparationResult(
-            success=False,
-            error="torchaudio HDemucs not available. Install with: pip install torch torchaudio"
-        )
-    except Exception as e:
-        logger.error("torchaudio HDemucs separation failed: %s", e, exc_info=True)
-        return SeparationResult(success=False, error=str(e))
-
-
-def separate_with_spleeter(
-    data: AudioArray,
-    samplerate: int,
-    stems: int = 2
-) -> SeparationResult:
-    """
-    Separate audio using Spleeter (Deezer).
-    Good quality, CPU-friendly.
-    
-    Args:
-        data: Audio samples
-        samplerate: Sample rate
-        stems: 2 (vocals/accompaniment), 4 (vocals/drums/bass/other), or 5 (+piano)
-    
-    Returns:
-        SeparationResult with success status and extracted tracks
-    """
-    try:
-        if data is None or len(data) == 0:
-            return SeparationResult(success=False, error="No audio data provided.")
-
-        logger.info("Starting Spleeter %d-stem separation...", stems)
-
-        # Ensure stereo float32
-        audio_data = data
-        if audio_data.ndim == 1:
-            audio_data = np.column_stack((audio_data, audio_data))
-        audio_data = np.ascontiguousarray(audio_data, dtype=np.float32)
-
-        separator = _get_spleeter_separator(stems)
-
-        stem_map = {}
-        if stems == 2:
-            stem_map = {"vocals": "Vocals", "accompaniment": "Instrumental"}
-        elif stems == 4:
-            stem_map = {"vocals": "Vocals", "drums": "Drums", "bass": "Bass", "other": "Other"}
-        else:
-            stem_map = {
-                "vocals": "Vocals",
-                "drums": "Drums",
-                "bass": "Bass",
-                "piano": "Piano",
-                "other": "Other",
-            }
-
-        tracks: list[tuple[str, AudioArray]] = []
-
-        try:
-            separated = separator.separate(audio_data, samplerate)
-            for stem_key, stem_name in stem_map.items():
-                if stem_key in separated:
-                    tracks.append((stem_name, separated[stem_key].astype(np.float32)))
-            logger.info("Spleeter in-memory separation complete")
-        except Exception as e:
-            logger.warning("Spleeter in-memory separation failed, falling back: %s", e)
-            import soundfile as sf
-            from scipy.signal import resample
-
-            with tempfile.TemporaryDirectory() as tmpdir:
-                input_path = os.path.join(tmpdir, "input.wav")
-                output_dir = os.path.join(tmpdir, "output")
-
-                sf.write(input_path, audio_data, samplerate)
-                separator.separate_to_file(input_path, output_dir)
-
-                stem_folder = os.path.join(output_dir, "input")
-                stem_files = [f"{key}.wav" for key in stem_map.keys()]
-
-                for stem_file, stem_key in zip(stem_files, stem_map.keys()):
-                    stem_path = os.path.join(stem_folder, stem_file)
-                    if os.path.exists(stem_path):
-                        stem_data, stem_sr = sf.read(stem_path)
-
-                        if stem_sr != samplerate:
-                            target_len = int(len(stem_data) * samplerate / stem_sr)
-                            if stem_data.ndim > 1:
-                                resampled = np.zeros((target_len, stem_data.shape[1]))
-                                for ch in range(stem_data.shape[1]):
-                                    resampled[:, ch] = resample(stem_data[:, ch], target_len)
-                                stem_data = resampled
-                            else:
-                                stem_data = resample(stem_data, target_len)
-
-                        tracks.append((stem_map[stem_key], stem_data.astype(np.float32)))
-
-        if not tracks:
-            return SeparationResult(success=False, error="Spleeter produced no stems.")
-
-        logger.info("Spleeter separation completed successfully")
-        return SeparationResult(success=True, tracks=tracks)
-        
-    except ImportError as e:
-        logger.warning("Spleeter not available: %s", e)
-        return SeparationResult(
-            success=False,
-            error="Spleeter not installed. Install with: pip install spleeter"
-        )
-    except Exception as e:
-        logger.error("Spleeter separation failed: %s", e, exc_info=True)
-        return SeparationResult(success=False, error=str(e))
-
-
 def separate_with_dsp(data: AudioArray, samplerate: int) -> SeparationResult:
     """
     Separate vocals using DSP-based center channel cancellation.
@@ -550,7 +302,7 @@ def separate_vocals_auto(
 ) -> SeparationResult:
     """
     Automatically select the best available separation method.
-    Tries Demucs first, then torchaudio HDemucs, then Spleeter, then falls back to DSP.
+    Tries Demucs first, then falls back to DSP.
     
     Args:
         data: Audio samples
@@ -566,27 +318,7 @@ def separate_vocals_auto(
         result = separate_with_demucs(data, samplerate, two_stems)
         if result.success:
             return result
-        logger.warning("Demucs API failed, trying alternatives...")
-
-    # Try torchaudio HDemucs
-    try:
-        import torchaudio
-        logger.info("Trying torchaudio HDemucs separation...")
-        result = separate_with_torchaudio_hdemucs(data, samplerate, two_stems)
-        if result.success:
-            return result
-        logger.warning("torchaudio HDemucs failed, trying alternatives...")
-    except ImportError:
-        pass
-    
-    # Try Spleeter (handles device internally via TensorFlow)
-    if is_spleeter_available():
-        logger.info("Trying Spleeter separation...")
-        stems = 2 if two_stems else 4
-        result = separate_with_spleeter(data, samplerate, stems)
-        if result.success:
-            return result
-        logger.warning("Spleeter failed, falling back to DSP...")
+        logger.warning("Demucs API failed, falling back to DSP...")
     
     # Fallback to DSP
     logger.warning("No AI separation available, using DSP fallback...")

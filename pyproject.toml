@@ -44,9 +44,6 @@ ai = [
     "torchaudio>=2.0.0",
     "demucs>=4.0.0",
 ]
-spleeter = [
-    "spleeter>=2.3.0",
-]
 pitch = [
     "pyrubberband>=0.3.0",
 ]
@@ -61,7 +58,7 @@ dev = [
     "ruff>=0.1.0",
 ]
 all = [
-    "pyaudioeditor[ai,spleeter,pitch,formant,dev]",
+    "pyaudioeditor[ai,pitch,formant,dev]",
 ]
 
 [project.scripts]
