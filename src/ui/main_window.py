@@ -1088,6 +1088,10 @@ class MainWindow(QMainWindow):
             if self.global_visible_len <= 0 or (len(self.audio_engine.tracks) == 1 and self.global_visible_len < max_samples):
                 self.global_visible_start = 0
                 self.global_visible_len = max_samples
+            elif self.global_visible_len > max_samples:
+                # Clamp when effects shorten audio (e.g., nightcore)
+                self.global_visible_len = max_samples
+                self.global_visible_start = min(self.global_visible_start, max(0, max_samples - self.global_visible_len))
 
         for track in self.audio_engine.tracks:
             tw = TrackWidget(track, self.audio_engine)
