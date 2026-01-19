@@ -134,29 +134,66 @@ class PlaybackController:
                 chunk_end = current_f + frames
                 
                 for track in active_tracks:
-                    data = track.data
-                    if data is None:
-                        continue
+                    # Optimized: use clips directly to avoid expensive data property
+                    # and correctly handle timing/offsets
+                    if hasattr(track, 'clips') and track.clips:
+                        for clip in track.clips:
+                            c_start = clip.start_offset
+                            c_data = clip.data
+                            c_len = len(c_data)
+                            c_end = c_start + c_len
+                            
+                            # Check intersection with current chunk
+                            intersect_start = max(c_start, current_f)
+                            intersect_end = min(c_end, chunk_end)
+                            
+                            if intersect_end > intersect_start:
+                                # Map to buffer indices
+                                clip_offset = intersect_start - c_start
+                                clip_len = intersect_end - intersect_start
+                                
+                                out_offset = intersect_start - current_f
+                                
+                                # Mix
+                                segment = c_data[clip_offset:clip_offset + clip_len]
+                                gain = track.gain
+                                
+                                if segment.ndim == 1:
+                                    # Mono to stereo
+                                    mixed = segment * gain
+                                    outdata[out_offset:out_offset + clip_len, 0] += mixed
+                                    outdata[out_offset:out_offset + clip_len, 1] += mixed
+                                else:
+                                    # Stereo
+                                    outdata[out_offset:out_offset + clip_len] += segment * gain
                     
-                    t_len = len(data)
-                    if current_f >= t_len:
-                        continue
-                    
-                    # Calculate slice bounds
-                    t_end = min(chunk_end, t_len)
-                    out_end = t_end - current_f
-                    
-                    gain = track.gain
-                    
-                    # Mix with optimized broadcasting
-                    if data.ndim == 1:
-                        # Mono to stereo
-                        slice_data = data[current_f:t_end] * gain
-                        outdata[:out_end, 0] += slice_data
-                        outdata[:out_end, 1] += slice_data
-                    else:
-                        # Stereo direct mix
-                        outdata[:out_end] += data[current_f:t_end] * gain
+                    elif track.data is not None:
+                         # Legacy fallback: use data + start_offset
+                         data = track.data
+                         offset = track.start_offset
+                         t_len = len(data)
+                         
+                         # Effective start/end of track in timeline
+                         t_start = offset
+                         t_end_abs = offset + t_len
+                         
+                         intersect_start = max(t_start, current_f)
+                         intersect_end = min(t_end_abs, chunk_end)
+                         
+                         if intersect_end > intersect_start:
+                             d_start = intersect_start - offset
+                             d_len = intersect_end - intersect_start
+                             out_offset = intersect_start - current_f
+                             
+                             segment = data[d_start:d_start + d_len]
+                             gain = track.gain
+                             
+                             if segment.ndim == 1:
+                                 mixed = segment * gain
+                                 outdata[out_offset:out_offset + d_len, 0] += mixed
+                                 outdata[out_offset:out_offset + d_len, 1] += mixed
+                             else:
+                                 outdata[out_offset:out_offset + d_len] += segment * gain
                 
                 # Prevent digital clipping
                 np.clip(outdata, -1.0, 1.0, out=outdata)

@@ -24,6 +24,7 @@ class Project:
     name: str = "Untitled Project"
     samplerate: int = field(default_factory=lambda: AUDIO_CONFIG.default_samplerate)
     tracks: list["AudioTrack"] = field(default_factory=list)
+    custom_duration_samples: int = 0
     _undo_manager: Optional["UndoManager"] = field(default=None, repr=False)
     clipboard: Optional[ClipboardData] = field(default=None, repr=False)
     
@@ -42,10 +43,11 @@ class Project:
     
     @property
     def duration_samples(self) -> int:
-        """Total project duration in samples (longest track)."""
-        if not self.tracks:
-            return 0
-        return max(t.duration_samples for t in self.tracks)
+        """Total project duration in samples (max of tracks and custom duration)."""
+        max_track_dur = 0
+        if self.tracks:
+            max_track_dur = max(t.duration_samples for t in self.tracks)
+        return max(max_track_dur, self.custom_duration_samples)
     
     @property
     def duration_seconds(self) -> float:
@@ -107,16 +109,23 @@ class Project:
             
             data = track.data
             track_len = len(data)
+            offset = track.start_offset
             gain = track.gain
+            
+            # End of segment in output
+            t_end = min(max_len, offset + track_len)
+            d_end = t_end - offset # effective length to copy
+            
+            if d_end <= 0: continue
             
             # Convert mono to stereo if needed
             if data.ndim == 1:
                 # Mono: apply to both channels
-                output[:track_len, 0] += data * gain
-                output[:track_len, 1] += data * gain
+                output[offset:t_end, 0] += data[:d_end] * gain
+                output[offset:t_end, 1] += data[:d_end] * gain
             else:
                 # Stereo: direct addition with gain
-                output[:track_len] += data * gain
+                output[offset:t_end] += data[:d_end] * gain
         
         # Soft clip to prevent harsh digital distortion
         np.clip(output, -1.0, 1.0, out=output)

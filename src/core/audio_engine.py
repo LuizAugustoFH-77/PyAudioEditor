@@ -153,6 +153,11 @@ class AudioEngine(QObject):
         """Get maximum duration across all tracks in seconds."""
         return self.project.duration_seconds
     
+    def set_timeline_duration(self, seconds: float) -> None:
+        """Set the custom timeline duration in seconds."""
+        self.project.custom_duration_samples = int(seconds * self.samplerate)
+        self.tracksChanged.emit()
+
     def clear_project(self) -> None:
         """Reset the engine to a clean state."""
         self.stop()
@@ -242,17 +247,27 @@ class AudioEngine(QObject):
     # =========================================================================
     
     def split_track(self, sample_index: int) -> bool:
-        """Add a split point to all tracks at the given sample."""
+        """
+        Split all tracks locally at the given sample.
+        This modifies the 'clips' within the track.
+        """
         any_modified = False
         
+        # Snapshot for undo
+        original_tracks = [t.copy() for t in self.tracks]
+        
         for track in self.tracks:
-            if track.add_split(sample_index):
+            # track.split_at expects a global timeline sample index usually?
+            # Looking at track implementation: 
+            #   if clip.start_offset < sample_index < clip.end_offset
+            #   Yes, clip.start_offset is global. So sample_index should be global.
+            if track.split_at(sample_index):
                 any_modified = True
         
         if any_modified:
             def undo() -> None:
-                for track in self.tracks:
-                    track.remove_split(sample_index)
+                self.project.tracks.clear()
+                self.project.tracks.extend([t.copy() for t in original_tracks])
                 self.tracksChanged.emit()
             
             def redo() -> None:
@@ -262,6 +277,48 @@ class AudioEngine(QObject):
             self.tracksChanged.emit()
         
         return any_modified
+    
+    def move_segment(self, track_index: int, old_start: int, old_end: int, new_start: int) -> bool:
+        """
+        Move a clip within a track.
+        """
+        track = self.project.get_track(track_index)
+        if track is None:
+            return False
+
+        shift = new_start - old_start
+        if shift == 0:
+            return False
+        
+        # Find which clip matches old_start/old_end
+        target_clip = None
+        for clip in track.clips:
+            # We assume exact match for drag logic initiation
+            if clip.start_offset == old_start and clip.end_offset == old_end:
+                target_clip = clip
+                break
+        
+        if target_clip is None:
+            return False
+
+        old_offset = target_clip.start_offset
+        new_offset = max(0, new_start) # Clamp
+        
+        if new_offset == old_offset:
+            return False
+
+        def undo() -> None:
+            target_clip.start_offset = old_offset
+            self.tracksChanged.emit()
+
+        def redo() -> None:
+            target_clip.start_offset = new_offset
+            self.tracksChanged.emit()
+
+        self.undo_manager.push_action(f"Move clip in {track.name}", undo, redo)
+        target_clip.start_offset = new_offset
+        self.tracksChanged.emit()
+        return True
     
     def delete_range(self, start_sample: int, end_sample: int) -> bool:
         """Delete a range of audio from all tracks."""

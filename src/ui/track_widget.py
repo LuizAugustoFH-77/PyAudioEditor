@@ -175,10 +175,18 @@ class TrackWidget(QWidget):
         # Waveform View (Right)
         self._waveform = WaveformWidget()
         
-        if self._track.data is not None:
-            logger.info("Setting waveform data: %d samples", len(self._track.data))
+        # Connect segment moved signal
+        self._waveform.segmentMoved.connect(self._on_segment_moved)
+        
+        if self._track.clips or self._track.data is not None:
+            logger.info("Setting waveform data: %d clips", len(self._track.clips))
             self._waveform.blockSignals(True)
-            self._waveform.set_data(self._track.data, splits=self._track.splits)
+            self._waveform.set_data(
+                None, # Don't pass flattened data if using clips
+                splits=self._track.splits, 
+                start_offset=self._track.start_offset,
+                clips=self._track.clips
+            )
             self._waveform.blockSignals(False)
         
         self._layout.addWidget(self._controls_widget)
@@ -335,3 +343,17 @@ class TrackWidget(QWidget):
     def track_index(self) -> int:
         """Get track index (legacy compatibility)."""
         return self._get_track_index()
+    
+    def _on_segment_moved(self, old_start: int, old_end: int, new_start: int, new_end: int) -> None:
+        """Handle segment moved signal from waveform widget."""
+        track_idx = self._get_track_index()
+        if track_idx >= 0:
+            if self._audio_engine.move_segment(track_idx, old_start, old_end, new_start):
+                 # Update view
+                 self._waveform.set_data(
+                     None, 
+                     splits=self._track.splits, 
+                     start_offset=self._track.start_offset,
+                     clips=self._track.clips
+                 )
+                 logger.info("Segment moved from %d-%d to %d-%d", old_start, old_end, new_start, new_end)

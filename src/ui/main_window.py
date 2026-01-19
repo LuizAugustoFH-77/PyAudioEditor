@@ -262,7 +262,7 @@ class MainWindow(QMainWindow):
                     "<li><code>Ctrl+Z</code> Undo, <code>Ctrl+Y</code> Redo</li>"
                     "<li><code>Ctrl+C</code> Copy, <code>Ctrl+X</code> Cut</li>"
                     "<li><code>Ctrl+V</code> Paste, <code>Del</code> Delete</li>"
-                    "<li><code>Ctrl+A</code> Select all</li>"
+                    "<li><code>Ctrl+A</code> Select all, <code>S</code> Split</li>"
                     "</ul>"
                 ),
             },
@@ -395,7 +395,7 @@ class MainWindow(QMainWindow):
         edit_toolbar.addSeparator()
 
         split_action = QAction(qta.icon("fa5s.cut", color="#ffaa00"), "Split (Trim)", self)
-        split_action.setShortcut("Ctrl+S")
+        split_action.setShortcut("S")
         split_action.triggered.connect(self.split_at_playhead)
         edit_toolbar.addAction(split_action)
 
@@ -917,11 +917,44 @@ class MainWindow(QMainWindow):
         demucs_4stem_action.triggered.connect(lambda: self.apply_tool_to_track("demucs_4stem"))
         ai_menu.addAction(demucs_4stem_action)
 
+        tools_menu.addSeparator()
+        
+        # Timeline Duration
+        timeline_action = QAction(qta.icon("fa5s.ruler-horizontal", color="orange"), "Set Timeline Duration...", self)
+        timeline_action.triggered.connect(self.show_timeline_duration_dialog)
+        tools_menu.addAction(timeline_action)
 
     def toggle_all_spectrograms(self, checked):
         for tw in self.track_widgets:
             tw.waveform.toggle_spectrogram(checked)
         self.statusBar().showMessage(f"Spectrogram {'enabled' if checked else 'disabled'}", 2000)
+
+    def show_timeline_duration_dialog(self) -> None:
+        """Show dialog to set custom timeline duration."""
+        # Get current duration
+        current_samples = self.audio_engine.get_max_duration_samples()
+        sr = self.audio_engine.samplerate
+        current_seconds = current_samples / sr if sr > 0 else 0
+        current_minutes = current_seconds / 60
+        
+        # Ask for new duration in minutes
+        new_minutes, ok = QInputDialog.getDouble(
+            self,
+            "Set Timeline Duration",
+            "Enter timeline duration in minutes:",
+            value=current_minutes,
+            min=0.5,
+            max=120.0,
+            decimals=2
+        )
+        
+        if ok:
+            # Set in engine (updates project and emits tracksChanged)
+            self.audio_engine.set_timeline_duration(new_minutes * 60)
+            self.statusBar().showMessage(f"Timeline set to {new_minutes:.1f} minutes", 3000)
+            
+            # refresh_track_list will be called via tracksChanged signal, 
+            # which will trigger update_scrollbar_range.
 
     def apply_tool_to_track(self, tool_name):
         if not self.audio_engine.tracks:
@@ -1151,13 +1184,13 @@ class MainWindow(QMainWindow):
         sender = self.sender()
         if not isinstance(sender, WaveformWidget): return
             
-        max_samples = self.audio_engine.get_max_duration_samples()
+        total_samples = self.audio_engine.get_max_duration_samples()
         
         # Update global state from sender
-        self.global_visible_len = max(100, min(sender.visible_len, max_samples))
+        self.global_visible_len = max(100, min(sender.visible_len, total_samples))
         self.global_visible_start = max(
             0,
-            min(sender.visible_start, max_samples - self.global_visible_len),
+            min(sender.visible_start, total_samples - self.global_visible_len),
         )
         
         # Sync all tracks
@@ -1198,10 +1231,10 @@ class MainWindow(QMainWindow):
         """Handles global scrollbar movement."""
         if not self.track_widgets: return
         
-        max_samples = self.audio_engine.get_max_duration_samples()
-        self.global_visible_start = max(0, min(value, max_samples - self.global_visible_len))
+        total_samples = self.audio_engine.get_max_duration_samples()
+        self.global_visible_start = max(0, min(value, total_samples - self.global_visible_len))
         
-        self.time_ruler.set_view(self.global_visible_start, self.global_visible_len, max_samples, self.audio_engine.samplerate)
+        self.time_ruler.set_view(self.global_visible_start, self.global_visible_len, total_samples, self.audio_engine.samplerate)
         
         for tw in self.track_widgets:
             tw.waveform.blockSignals(True)
